@@ -1,0 +1,36 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+
+@theme {
+    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+        'Segoe UI Symbol', 'Noto Color Emoji';
+}
+
+@layer components {
+    .sidebar { @apply flex w-full flex-col bg-slate-950 lg:sticky lg:top-0 lg:h-screen lg:w-64 lg:shrink-0; }
+    .nav-link { @apply block rounded-xl px-4 py-3 text-sm font-semibold text-slate-300 transition hover:bg-slate-800 hover:text-white; }
+    .nav-link.active { @apply bg-indigo-600 text-white shadow-lg shadow-indigo-950/30; }
+    .page-title { @apply text-3xl font-black tracking-tight text-slate-950 sm:text-4xl; }
+    .page-copy, .section-copy { @apply mt-1 text-sm text-slate-500; }
+    .eyebrow { @apply mb-2 text-xs font-bold uppercase tracking-[0.18em] text-indigo-600; }
+    .section-title { @apply text-lg font-bold tracking-tight text-slate-950; }
+    .panel { @apply overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm; }
+    .panel-header { @apply flex items-center justify-between gap-4 border-b border-slate-100 p-5; }
+    .metric-card { @apply rounded-3xl border border-slate-200 bg-white p-5 shadow-sm; }
+    .status-pill { @apply inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold capitalize; }
+    .primary-button { @apply inline-flex items-center justify-center rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40; }
+    .secondary-button { @apply inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-bold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40; }
+    .danger-button { @apply inline-flex items-center justify-center rounded-xl bg-red-600 px-4 py-3 text-sm font-bold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40; }
+    .field-label { @apply block text-sm font-semibold text-slate-700; }
+    .field-input { @apply mt-2 block w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm font-normal text-slate-950 outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100; }
+    .form-grid { @apply grid gap-5 sm:grid-cols-2; }
+    .data-table { @apply w-full min-w-[760px] text-left text-sm; }
+    .data-table th { @apply bg-slate-50 px-5 py-3 text-xs font-bold uppercase tracking-wider text-slate-500; }
+    .data-table td { @apply border-t border-slate-100 px-5 py-4 text-slate-700; }
+    .data-table tbody tr { @apply transition hover:bg-slate-50; }
+    .details-grid { @apply grid gap-5 sm:grid-cols-2; }
+    .details-grid dt { @apply text-xs font-semibold uppercase tracking-wide text-slate-400; }
+    .details-grid dd { @apply mt-1 font-semibold text-slate-900; }
+}
