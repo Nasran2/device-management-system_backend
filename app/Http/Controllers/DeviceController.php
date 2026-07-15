@@ -63,6 +63,20 @@ class DeviceController extends Controller
         return view('devices.show', ['device' => $device->load(['customer', 'admin', 'managementPinChangedBy', 'commands.requester', 'locations'])]);
     }
 
+    public function edit(Device $device)
+    {
+        $this->authorize('update', $device);
+        return view('devices.edit', ['device'=>$device->load('customer')]);
+    }
+
+    public function update(Request $request, Device $device, AuditService $audit)
+    {
+        $this->authorize('update', $device);
+        $data=$request->validate(['brand'=>['required','string','max:80'],'model'=>['required','string','max:120'],'selling_price'=>['required','numeric','min:0'],'currency'=>['required','string','size:3'],'shop_branch'=>['nullable','string','max:120'],'support_phone'=>['nullable','string','max:30'],'notes'=>['nullable','string','max:2000']]);
+        $before=$device->only(array_keys($data));$device->update($data);$audit->record('DEVICE_UPDATED','Device record updated',$request->user(),$device,$before,$data);
+        return redirect()->route('devices.show',$device)->with('success','Device updated.');
+    }
+
     public function command(Request $request, Device $device, CommandService $commands)
     {
         $this->authorize('control', $device);

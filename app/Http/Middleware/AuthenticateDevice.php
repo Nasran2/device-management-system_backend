@@ -13,7 +13,7 @@ class AuthenticateDevice
     {
         $plain = $request->bearerToken();
         $token = $plain ? DeviceToken::with('device')->where('token_hash', hash('sha256', $plain))->whereNull('revoked_at')->first() : null;
-        if (! $token || $token->device->isReleased()) {
+        if (! $token || ! $token->device || $token->device->trashed() || $token->device->isReleased()) {
             return response()->json(['message' => 'Unauthenticated device.'], 401);
         }
         $token->update(['last_used_at' => now()]);

@@ -20,6 +20,7 @@
             <a class="nav-link {{ request()->routeIs('devices.index') || request()->routeIs('devices.show') ? 'active' : '' }}" href="{{ route('devices.index') }}">{{ auth()->user()->isSuperAdmin() ? 'All devices' : 'My devices' }}</a>
             <a class="nav-link {{ request()->routeIs('devices.create') ? 'active' : '' }}" href="{{ route('devices.create') }}">Register device</a>
             @if(auth()->user()->isSuperAdmin())<a class="nav-link {{ request()->routeIs('settings.qr-provisioning*') ? 'active' : '' }}" href="{{ route('settings.qr-provisioning') }}">QR Provisioning Settings</a>@endif
+            @if(auth()->user()->isSuperAdmin())<a class="nav-link {{ request()->routeIs('devices.archived') ? 'active' : '' }}" href="{{ route('devices.archived') }}">Archived Devices</a>@endif
         </nav>
         <div class="mt-auto border-t border-slate-800 p-4">
             <p class="truncate text-sm font-semibold text-white">{{ auth()->user()->name }}</p>

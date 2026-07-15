@@ -4,10 +4,12 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Str;
 
 class Device extends Model
 {
+    use SoftDeletes;
     protected $guarded = ['id'];
 
     protected $hidden = ['management_pin_hash', 'management_pin_encrypted'];
@@ -29,6 +31,7 @@ class Device extends Model
         'released_at' => 'datetime',
         'management_pin_changed_at' => 'datetime',
         'management_pin_locked_until' => 'datetime',
+        'deleted_at' => 'datetime',
     ];
 
     public function __construct(array $attributes = [])
@@ -46,6 +49,11 @@ class Device extends Model
     public function managementPinChangedBy()
     {
         return $this->belongsTo(User::class, 'management_pin_changed_by');
+    }
+
+    public function archivedBy()
+    {
+        return $this->belongsTo(User::class, 'archived_by');
     }
 
     public function customer()

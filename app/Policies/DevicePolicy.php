@@ -41,4 +41,24 @@ class DevicePolicy
     {
         return $device->admin_id === $user->id && $user->can_view_locations;
     }
+
+    public function archive(User $user, Device $device): bool
+    {
+        return $device->admin_id === $user->id;
+    }
+
+    public function restore(User $user, Device $device): bool
+    {
+        return false;
+    }
+
+    public function delete(User $user, Device $device): bool
+    {
+        return false;
+    }
+
+    public function forceDelete(User $user, Device $device): bool
+    {
+        return false;
+    }
 }

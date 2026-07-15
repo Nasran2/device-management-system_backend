@@ -249,4 +249,46 @@ class DeviceManagementTest extends TestCase
         $this->postJson('/api/v1/devices/provision',$payload)->assertOk()->assertJsonStructure(['data'=>['device_token','command_verification_key']]);$this->assertSame('completed',$token->fresh()->status);$this->assertTrue($device->fresh()->is_device_owner);
         $this->postJson('/api/v1/devices/provision',$payload)->assertStatus(410)->assertJsonPath('error_code','TOKEN_INVALID');
     }
+
+    public function test_admin_can_archive_only_own_device_but_can_never_permanently_delete(): void
+    {
+        $owner=$this->user();$other=$this->user();$device=$this->device($owner,['status'=>'pending_activation']);
+        $this->actingAs($owner)->get(route('devices.index'))->assertOk()->assertDontSee('Permanently Delete');
+        $this->actingAs($this->user('super_admin'))->get(route('devices.index'))->assertOk()->assertSee('Permanently Delete');
+        $this->actingAs($other)->post(route('devices.archive',$device),['password'=>'Password@123'])->assertForbidden();
+        $this->actingAs($owner)->delete(route('devices.destroy',$device->id),['password'=>'Password@123','reason'=>'Not allowed','confirmation'=>'DELETE','confirmed'=>'1'])->assertForbidden();
+        $this->actingAs($owner)->post(route('devices.archive',$device),['password'=>'Password@123'])->assertRedirect(route('devices.index'));
+        $this->assertSoftDeleted('devices',['id'=>$device->id]);$this->assertDatabaseHas('audit_logs',['device_id'=>$device->id,'action'=>'DEVICE_ARCHIVED']);
+    }
+
+    public function test_archived_device_is_hidden_listed_for_super_admin_and_can_be_restored(): void
+    {
+        $admin=$this->user();$super=$this->user('super_admin');$device=$this->device($admin,['status'=>'pending_activation']);$device->update(['archived_by'=>$admin->id,'status_before_archive'=>'pending_activation']);$device->delete();
+        $this->actingAs($admin)->get(route('devices.index'))->assertDontSee($device->uuid);
+        $this->actingAs($admin)->get(route('devices.archived'))->assertForbidden();
+        $this->actingAs($super)->get(route('devices.archived'))->assertOk()->assertSee($device->brand);
+        $this->actingAs($super)->post(route('devices.restore',$device->id),['password'=>'Password@123'])->assertRedirect(route('devices.archived'));
+        $this->assertNotSoftDeleted('devices',['id'=>$device->id]);$this->assertSame('pending_activation',$device->fresh()->status);
+    }
+
+    public function test_super_admin_password_and_safe_status_are_required_for_permanent_delete(): void
+    {
+        $super=$this->user('super_admin');$pending=$this->device($this->user(),['status'=>'pending_activation']);
+        $payload=['reason'=>'Duplicate record','confirmation'=>'DELETE','confirmed'=>'1'];
+        $this->actingAs($super)->delete(route('devices.destroy',$pending->id),$payload)->assertSessionHasErrors('password');
+        $this->actingAs($super)->delete(route('devices.destroy',$pending->id),$payload+['password'=>'wrong'])->assertSessionHasErrors('password');
+        $this->actingAs($super)->delete(route('devices.destroy',$pending->id),$payload+['password'=>'Password@123'])->assertRedirect(route('devices.index'));
+        $this->assertDatabaseMissing('devices',['id'=>$pending->id]);
+        $active=$this->device($this->user(),['status'=>'active_unlocked','device_uuid'=>'5c371414-52aa-44a1-9ad7-ca4cbf867c94','is_device_owner'=>true]);
+        $this->actingAs($super)->delete(route('devices.destroy',$active->id),$payload+['password'=>'Password@123'])->assertSessionHasErrors('device');$this->assertDatabaseHas('devices',['id'=>$active->id]);
+    }
+
+    public function test_force_delete_requires_extra_confirmation_and_cleans_relations_while_retaining_audit(): void
+    {
+        $owner=$this->user();$super=$this->user('super_admin');$device=$this->device($owner,['status'=>'active_unlocked','is_device_owner'=>true]);$device->tokens()->create(['token_hash'=>hash('sha256','cleanup-token')]);$device->activations()->create(['code_hash'=>Hash::make('CODE-TEST'),'expires_at'=>now()->addHour()]);
+        $payload=['password'=>'Password@123','reason'=>'Authorized server cleanup','confirmation'=>'DELETE','confirmed'=>'1'];
+        $this->actingAs($super)->delete(route('devices.force-delete',$device->id),$payload)->assertSessionHasErrors('force_confirmed');
+        $this->actingAs($super)->delete(route('devices.force-delete',$device->id),$payload+['force_confirmed'=>'1'])->assertRedirect(route('devices.index'));
+        $this->assertDatabaseMissing('devices',['id'=>$device->id]);$this->assertDatabaseMissing('device_tokens',['device_id'=>$device->id]);$this->assertDatabaseMissing('device_activations',['device_id'=>$device->id]);$this->assertDatabaseHas('audit_logs',['device_id'=>null,'action'=>'DEVICE_FORCE_DELETED']);
+    }
 }

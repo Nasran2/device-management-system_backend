@@ -5,6 +5,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DeviceController;
 use App\Http\Controllers\DeviceManagementPinController;
 use App\Http\Controllers\DeviceProvisioningController;
+use App\Http\Controllers\DeviceLifecycleController;
 use App\Http\Controllers\QrProvisioningSettingsController;
 use Illuminate\Support\Facades\Route;
 
@@ -15,7 +16,13 @@ Route::middleware('guest')->group(function () {
 });
 Route::middleware('auth')->group(function () {
     Route::get('/dashboard', DashboardController::class)->name('dashboard');
-    Route::resource('devices', DeviceController::class)->only(['index', 'create', 'store', 'show']);
+    Route::resource('devices', DeviceController::class)->only(['index', 'create', 'store', 'show', 'edit', 'update']);
+    Route::post('/devices/{device}/archive', [DeviceLifecycleController::class, 'archive'])->middleware('throttle:5,1')->name('devices.archive');
+    Route::delete('/devices/{device}', [DeviceLifecycleController::class, 'destroy'])->middleware('throttle:5,1')->name('devices.destroy');
+    Route::delete('/devices/{device}/force-delete', [DeviceLifecycleController::class, 'forceDestroy'])->middleware('throttle:5,1')->name('devices.force-delete');
+    Route::get('/archived-devices', [DeviceLifecycleController::class, 'archived'])->name('devices.archived');
+    Route::post('/archived-devices/{device}/restore', [DeviceLifecycleController::class, 'restore'])->middleware('throttle:5,1')->name('devices.restore');
+    Route::delete('/demo-devices/bulk', [DeviceLifecycleController::class, 'bulkDeleteDemo'])->middleware('throttle:3,1')->name('devices.demo.bulk-delete');
     Route::post('/devices/{device}/commands', [DeviceController::class, 'command'])->middleware('throttle:5,1')->name('devices.command');
     Route::post('/devices/{device}/release', [DeviceController::class, 'release'])->middleware('throttle:5,1')->name('devices.release');
     Route::post('/devices/{device}/unlock-code', [DeviceController::class, 'generateUnlockCode'])->middleware('throttle:5,1')->name('devices.unlock-code');

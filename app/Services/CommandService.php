@@ -22,8 +22,8 @@ class CommandService
         if (! in_array($type, self::ALLOWED, true)) {
             throw ValidationException::withMessages(['type' => 'Unsupported command type.']);
         }
-        if ($device->isReleased()) {
-            throw ValidationException::withMessages(['device' => 'Released devices cannot receive commands.']);
+        if ($device->trashed() || $device->isReleased()) {
+            throw ValidationException::withMessages(['device' => 'Archived or released devices cannot receive commands.']);
         }
 
         $command = DB::transaction(function () use ($device, $type, $payload, $requester) {
