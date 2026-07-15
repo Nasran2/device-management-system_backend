@@ -22,7 +22,7 @@ Route::middleware('auth')->group(function () {
     Route::delete('/devices/{device}/force-delete', [DeviceLifecycleController::class, 'forceDestroy'])->middleware('throttle:5,1')->name('devices.force-delete');
     Route::get('/archived-devices', [DeviceLifecycleController::class, 'archived'])->name('devices.archived');
     Route::post('/archived-devices/{device}/restore', [DeviceLifecycleController::class, 'restore'])->middleware('throttle:5,1')->name('devices.restore');
-    Route::delete('/demo-devices/bulk', [DeviceLifecycleController::class, 'bulkDeleteDemo'])->middleware('throttle:3,1')->name('devices.demo.bulk-delete');
+    Route::delete('/devices/bulk', [DeviceLifecycleController::class, 'bulkDelete'])->middleware('throttle:3,1')->name('devices.bulk-delete');
     Route::post('/devices/{device}/commands', [DeviceController::class, 'command'])->middleware('throttle:5,1')->name('devices.command');
     Route::post('/devices/{device}/release', [DeviceController::class, 'release'])->middleware('throttle:5,1')->name('devices.release');
     Route::post('/devices/{device}/unlock-code', [DeviceController::class, 'generateUnlockCode'])->middleware('throttle:5,1')->name('devices.unlock-code');

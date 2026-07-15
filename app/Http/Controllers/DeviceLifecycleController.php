@@ -54,15 +54,51 @@ class DeviceLifecycleController extends Controller
         return $this->permanentlyDelete($request, Device::withTrashed()->findOrFail($device), $audit, true);
     }
 
-    public function bulkDeleteDemo(Request $request, AuditService $audit)
+    public function bulkDelete(Request $request, AuditService $audit)
     {
         abort_unless($request->user()->isSuperAdmin(), 403);
-        $data = $request->validate(['device_ids'=>['required','array','min:1'],'device_ids.*'=>['integer'],'password'=>['required'],'confirmation'=>['required','in:DELETE'],'confirmed'=>['accepted'],'reason'=>['required','string','max:1000']]);
+        $data = $request->validate([
+            'device_ids' => ['required', 'array', 'min:1'],
+            'device_ids.*' => ['integer'],
+            'password' => ['required'],
+            'confirmation' => ['required', 'in:DELETE'],
+            'confirmed' => ['accepted'],
+            'reason' => ['required', 'string', 'max:1000']
+        ]);
+        
         $this->password($request);
-        $devices = Device::withTrashed()->whereIn('id',$data['device_ids'])->where('status','demo')->get();
-        abort_unless($devices->count() === count(array_unique($data['device_ids'])), 422, 'Only demo devices can be bulk deleted.');
-        DB::transaction(function () use ($devices,$request,$audit,$data) { foreach($devices as $device){$audit->record('DEMO_DEVICES_BULK_DELETED','Demo device permanently deleted: '.$data['reason'],$request->user(),$device,[],$this->snapshot($device)+['reason'=>$data['reason']]);$device->forceDelete();} });
-        return redirect()->route('devices.index')->with('success', $devices->count().' demo device(s) permanently deleted.');
+        
+        $devices = Device::withTrashed()->whereIn('id', $data['device_ids'])->get();
+        
+        $deletedCount = 0;
+        $skippedCount = 0;
+        
+        DB::transaction(function () use ($devices, $request, $audit, $data, &$deletedCount, &$skippedCount) {
+            foreach ($devices as $device) {
+                if (! $this->eligible($device)) {
+                    $skippedCount++;
+                    continue;
+                }
+                
+                $audit->record(
+                    'DEVICES_BULK_DELETED',
+                    'Device permanently deleted: ' . $data['reason'],
+                    $request->user(),
+                    $device,
+                    [],
+                    $this->snapshot($device) + ['reason' => $data['reason']]
+                );
+                $device->forceDelete();
+                $deletedCount++;
+            }
+        });
+        
+        $message = "{$deletedCount} device(s) permanently deleted.";
+        if ($skippedCount > 0) {
+            $message .= " {$skippedCount} device(s) were skipped because they are still actively managed.";
+        }
+        
+        return redirect()->route('devices.index')->with('success', $message);
     }
 
     private function permanentlyDelete(Request $request, Device $device, AuditService $audit, bool $force)
