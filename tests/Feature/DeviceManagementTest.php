@@ -291,4 +291,42 @@ class DeviceManagementTest extends TestCase
         $this->actingAs($super)->delete(route('devices.force-delete',$device->id),$payload+['force_confirmed'=>'1'])->assertRedirect(route('devices.index'));
         $this->assertDatabaseMissing('devices',['id'=>$device->id]);$this->assertDatabaseMissing('device_tokens',['device_id'=>$device->id]);$this->assertDatabaseMissing('device_activations',['device_id'=>$device->id]);$this->assertDatabaseHas('audit_logs',['device_id'=>null,'action'=>'DEVICE_FORCE_DELETED']);
     }
+
+    private function qrSettingsPayload(array $overrides=[]): array
+    {
+        return array_merge(['provisioning_api_url'=>'https://manage.example.com/api/v1/','provisioning_apk_url'=>'https://manage.example.com/deviceguard.apk','provisioning_apk_version'=>'1.0.0','provisioning_apk_checksum'=>'checksum','provisioning_qr_expiry_minutes'=>30,'provisioning_support_phone'=>'+94110000000'], $overrides);
+    }
+
+    public function test_qr_settings_save_without_wifi_and_omit_wifi_extras(): void
+    {
+        $super=$this->user('super_admin');
+        $this->actingAs($super)->put(route('settings.qr-provisioning.update'),$this->qrSettingsPayload())->assertSessionHasNoErrors()->assertSessionHas('success');
+        $this->assertDatabaseMissing('system_settings',['key'=>'provisioning_wifi_ssid']);
+        $device=$this->device($super);$payload=app(QrProvisioningService::class)->payload($device,'one-time-token');$json=json_encode($payload);
+        $this->assertStringNotContainsString('PROVISIONING_WIFI_SSID',$json);$this->assertStringNotContainsString('PROVISIONING_WIFI_PASSWORD',$json);$this->assertStringNotContainsString('PROVISIONING_WIFI_SECURITY_TYPE',$json);
+    }
+
+    public function test_wpa_wifi_requires_password_and_stores_it_encrypted(): void
+    {
+        $super=$this->user('super_admin');$base=$this->qrSettingsPayload(['wifi_ssid'=>'Shop WiFi','wifi_security_type'=>'WPA']);
+        $this->actingAs($super)->put(route('settings.qr-provisioning.update'),$base)->assertSessionHasErrors('wifi_password');
+        $this->actingAs($super)->put(route('settings.qr-provisioning.update'),$base+['wifi_password'=>'SecretPass123'])->assertSessionHasNoErrors();
+        $stored=SystemSetting::where('key','provisioning_wifi_password_encrypted')->value('value');$this->assertNotSame('SecretPass123',$stored);$this->assertSame('SecretPass123',Crypt::decryptString($stored));
+        $device=$this->device($super);$payload=app(QrProvisioningService::class)->payload($device,'token');$this->assertSame('Shop WiFi',$payload['android.app.extra.PROVISIONING_WIFI_SSID']);$this->assertSame('WPA',$payload['android.app.extra.PROVISIONING_WIFI_SECURITY_TYPE']);$this->assertSame('SecretPass123',$payload['android.app.extra.PROVISIONING_WIFI_PASSWORD']);
+    }
+
+    public function test_open_wifi_saves_without_password(): void
+    {
+        $super=$this->user('super_admin');
+        $this->actingAs($super)->put(route('settings.qr-provisioning.update'),$this->qrSettingsPayload(['wifi_ssid'=>'Guest Network','wifi_security_type'=>'NONE']))->assertSessionHasNoErrors();
+        $this->assertDatabaseHas('system_settings',['key'=>'provisioning_wifi_ssid','value'=>'Guest Network']);$this->assertDatabaseMissing('system_settings',['key'=>'provisioning_wifi_password_encrypted']);
+    }
+
+    public function test_wifi_fields_are_optional_and_saved_password_is_not_exposed_in_html(): void
+    {
+        $super=$this->user('super_admin');SystemSetting::create(['key'=>'provisioning_wifi_ssid','value'=>'Shop WiFi','type'=>'string']);SystemSetting::create(['key'=>'provisioning_wifi_password_encrypted','value'=>Crypt::encryptString('NeverExposeMe'),'type'=>'encrypted']);
+        $html=$this->actingAs($super)->get(route('settings.qr-provisioning'))->assertOk()->getContent();
+        preg_match('/<input[^>]+name="wifi_ssid"[^>]*>/',$html,$ssid);preg_match('/<input[^>]+name="wifi_password"[^>]*>/',$html,$password);
+        $this->assertNotEmpty($ssid);$this->assertNotEmpty($password);$this->assertStringNotContainsString('required',$ssid[0]);$this->assertStringNotContainsString('aria-required',$ssid[0]);$this->assertStringNotContainsString('required',$password[0]);$this->assertStringNotContainsString('NeverExposeMe',$html);$this->assertStringNotContainsString(SystemSetting::value('provisioning_wifi_password_encrypted'),$html);
+    }
 }
