@@ -6,9 +6,11 @@ use App\Http\Requests\StoreDeviceRequest;
 use App\Models\Customer;
 use App\Models\Device;
 use App\Models\DeviceAccessCode;
+use App\Models\SystemSetting;
 use App\Services\ActivationService;
 use App\Services\AuditService;
 use App\Services\CommandService;
+use App\Services\QrProvisioningService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Crypt;
@@ -56,11 +58,21 @@ class DeviceController extends Controller
         return redirect()->route('devices.show', $device)->with('success', 'Device registered.')->with('activation_code', $code);
     }
 
-    public function show(Device $device)
+    public function show(Device $device, QrProvisioningService $qr)
     {
         $this->authorize('view', $device);
 
-        return view('devices.show', ['device' => $device->load(['customer', 'admin', 'managementPinChangedBy', 'commands.requester', 'locations'])]);
+        return view('devices.show', [
+            'device' => $device->load(['customer', 'admin', 'managementPinChangedBy', 'commands.requester', 'locations']),
+            'qrConfigured' => $qr->configured(),
+            'qrReadiness' => [
+                'QR provisioning enabled' => (bool) SystemSetting::value('qr_provisioning_enabled', false),
+                'Production API URL configured' => filled(SystemSetting::value('provisioning_api_url')),
+                'Public APK HTTPS URL configured' => filled(SystemSetting::value('provisioning_apk_url')),
+                'APK signing checksum configured' => filled(SystemSetting::value('provisioning_apk_checksum')),
+                'Management PIN configured' => filled($device->management_pin_hash),
+            ],
+        ]);
     }
 
     public function edit(Device $device)

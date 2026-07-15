@@ -48,6 +48,48 @@ class DeviceManagementTest extends TestCase
         $this->actingAs($this->user('super_admin'))->get(route('devices.show', $device))->assertOk();
     }
 
+    public function test_device_page_makes_missing_qr_configuration_visible(): void
+    {
+        $super = $this->user('super_admin');
+        $device = $this->device($super, [
+            'management_pin_hash' => Hash::make('9876'),
+            'management_pin_encrypted' => Crypt::encryptString('9876'),
+        ]);
+
+        $this->actingAs($super)->get(route('devices.show', $device))
+            ->assertOk()
+            ->assertSee('Generate the QR code to scan')
+            ->assertSee('Configuration required')
+            ->assertSee('Open QR Provisioning Settings');
+    }
+
+    public function test_configured_device_page_generates_and_displays_scannable_qr(): void
+    {
+        $super = $this->user('super_admin');
+        $device = $this->device($super, [
+            'management_pin_hash' => Hash::make('9876'),
+            'management_pin_encrypted' => Crypt::encryptString('9876'),
+        ]);
+        foreach (['qr_provisioning_enabled' => ['true', 'boolean'], 'provisioning_api_url' => ['https://manage.example.com/api/v1/', 'string'], 'provisioning_apk_url' => ['https://manage.example.com/deviceguard.apk', 'string'], 'provisioning_apk_checksum' => ['checksum', 'string'], 'provisioning_qr_expiry_minutes' => ['30', 'integer']] as $key => [$value, $type]) {
+            SystemSetting::create(compact('key', 'value', 'type'));
+        }
+
+        $this->actingAs($super)->get(route('devices.show', $device))
+            ->assertOk()
+            ->assertSee('Ready to generate')
+            ->assertSee('Step 2 — Generate Full Management QR');
+
+        $response = $this->actingAs($super)->post(route('devices.provisioning.generate', $device), [
+            'password' => 'Password@123',
+        ]);
+
+        $response->assertRedirect();
+        $this->followRedirects($response)
+            ->assertOk()
+            ->assertSee('Full Management QR')
+            ->assertSee('Device Owner provisioning QR');
+    }
+
     public function test_lock_command_is_signed_and_does_not_prematurely_mark_device_locked(): void
     {
         $admin = $this->user();
