@@ -36,9 +36,15 @@ class DeviceSyncController extends Controller
             'location_permission_status' => ['required', 'string', 'max:30'],
             'background_location_permission_status' => ['required', 'string', 'max:30'],
             'notification_permission_status' => ['required', 'string', 'max:30'],
+            'fcm_token' => ['nullable', 'string', 'max:4096'],
         ]);
         $device = $request->attributes->get('device');
-        $device->update($data + ['management_status' => $data['is_device_owner'] && $data['is_admin_active'] ? 'active' : 'setup_required', 'last_sync_at' => now()]);
+        
+        $updateData = $data + ['management_status' => $data['is_device_owner'] && $data['is_admin_active'] ? 'active' : 'setup_required', 'last_sync_at' => now()];
+        if (isset($data['fcm_token'])) {
+            $updateData['fcm_token'] = $data['fcm_token'];
+        }
+        $device->update($updateData);
 
         return response()->json(['message' => 'Capabilities updated.']);
     }
