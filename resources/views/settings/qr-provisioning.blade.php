@@ -9,4 +9,12 @@
 <label class="flex items-center gap-2 text-sm"><input type="checkbox" name="wifi_hidden" value="1" @checked(old('wifi_hidden',App\Models\SystemSetting::value('provisioning_wifi_hidden',false)))> Hidden Wi-Fi network</label>
 </div></section>
 <label class="flex gap-3"><input type="checkbox" name="qr_provisioning_enabled" value="1" @checked(App\Models\SystemSetting::value('qr_provisioning_enabled',false))> QR provisioning enabled</label><button class="primary-button">Save settings</button></form>
-<div class="mt-4 flex gap-3"><form method="post" action="{{ route('settings.qr-provisioning.validate') }}">@csrf<button class="secondary-button">Validate Configuration</button></form>@if(App\Models\SystemSetting::value('provisioning_apk_url'))<a class="secondary-button" href="{{ App\Models\SystemSetting::value('provisioning_apk_url') }}" target="_blank">Test APK Download</a>@endif</div></div></x-layouts.app>
+@if(session('configuration_validation'))
+@php($validation=session('configuration_validation'))
+<section class="mt-6 rounded-2xl border p-5 {{ $validation['passed'] ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50' }}">
+<div class="flex items-center justify-between gap-3"><h2 class="font-black {{ $validation['passed'] ? 'text-emerald-900' : 'text-red-900' }}">Configuration validation {{ $validation['passed'] ? 'passed' : 'needs attention' }}</h2><span class="status-pill {{ $validation['passed'] ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800' }}">{{ $validation['passed'] ? 'Valid' : 'Failed' }}</span></div>
+<div class="mt-4 grid gap-2">@foreach($validation['checks'] as $label=>$check)<div class="flex items-start justify-between gap-4 rounded-xl bg-white/80 px-4 py-3 text-sm"><div><strong>{{ $label }}</strong><p class="mt-1 text-xs text-slate-600">{{ $check['message'] }}</p></div><strong class="{{ $check['passed'] ? 'text-emerald-700' : 'text-red-700' }}">{{ $check['passed'] ? 'Passed' : 'Failed' }}</strong></div>@endforeach</div>
+@if($validation['errors'])<ul class="mt-4 list-disc space-y-1 pl-5 text-sm text-red-800">@foreach($validation['errors'] as $error)<li>{{ $error }}</li>@endforeach</ul>@endif
+</section>
+@endif
+<div class="mt-4 flex gap-3"><form method="POST" action="{{ route('settings.qr-provisioning.validate') }}">@csrf<button type="submit" class="secondary-button">Validate Configuration</button></form>@if(App\Models\SystemSetting::value('provisioning_apk_url'))<a class="secondary-button" href="{{ App\Models\SystemSetting::value('provisioning_apk_url') }}" target="_blank" rel="noopener noreferrer">Test APK Download</a>@endif</div></div></x-layouts.app>

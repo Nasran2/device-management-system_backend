@@ -13,6 +13,7 @@ use App\Services\QrProvisioningService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 
@@ -337,6 +338,65 @@ class DeviceManagementTest extends TestCase
     private function qrSettingsPayload(array $overrides=[]): array
     {
         return array_merge(['provisioning_api_url'=>'https://manage.example.com/api/v1/','provisioning_apk_url'=>'https://manage.example.com/deviceguard.apk','provisioning_apk_version'=>'1.0.0','provisioning_apk_checksum'=>'checksum','provisioning_qr_expiry_minutes'=>30,'provisioning_support_phone'=>'+94110000000'], $overrides);
+    }
+
+    private function saveQrValidationSettings(array $overrides=[]): void
+    {
+        $settings=array_merge(['provisioning_api_url'=>['https://manage.example.com/api/v1/','string'],'provisioning_apk_url'=>['https://manage.example.com/deviceguard-1.0.2.apk','string'],'provisioning_apk_version'=>['1.0.2','string'],'provisioning_apk_checksum'=>['checksum','string'],'qr_provisioning_enabled'=>['true','boolean']],$overrides);
+        foreach($settings as $key=>[$value,$type]) SystemSetting::updateOrCreate(['key'=>$key],['value'=>$value,'type'=>$type]);
+    }
+
+    public function test_qr_validation_reads_saved_settings_and_checks_health_and_apk(): void
+    {
+        $super=$this->user('super_admin');$this->saveQrValidationSettings();
+        Http::fake([
+            'https://manage.example.com/api/v1/health'=>Http::response(['success'=>true,'message'=>'DeviceGuard API is running'],200),
+            'https://manage.example.com/deviceguard-1.0.2.apk'=>Http::response('',200,['Content-Type'=>'application/vnd.android.package-archive','Content-Length'=>'13000000']),
+        ]);
+
+        $response=$this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
+        $response->assertRedirect(route('settings.qr-provisioning'))->assertSessionHasNoErrors()->assertSessionHas('success')->assertSessionHas('configuration_validation.passed',true);
+        Http::assertSent(fn($request)=>$request->url()==='https://manage.example.com/api/v1/health');
+        Http::assertSent(fn($request)=>$request->method()==='HEAD'&&$request->url()==='https://manage.example.com/deviceguard-1.0.2.apk');
+    }
+
+    public function test_qr_validation_redirects_with_readable_saved_setting_errors_instead_of_422(): void
+    {
+        $super=$this->user('super_admin');$this->saveQrValidationSettings(['provisioning_apk_checksum'=>['','string'],'qr_provisioning_enabled'=>['false','boolean']]);
+        $response=$this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
+        $response->assertRedirect(route('settings.qr-provisioning'))->assertSessionHasErrors('configuration')->assertSessionHas('configuration_validation.passed',false);
+        $result=$response->getSession()->get('configuration_validation');
+        $this->assertContains('Signing certificate checksum is missing.',$result['errors']);$this->assertContains('QR provisioning is disabled.',$result['errors']);
+        Http::assertNothingSent();
+    }
+
+    public function test_qr_validation_rejects_non_https_urls_without_422(): void
+    {
+        $super=$this->user('super_admin');$this->saveQrValidationSettings(['provisioning_api_url'=>['http://manage.example.com/api/v1/','string'],'provisioning_apk_url'=>['http://manage.example.com/app.apk','string']]);
+        $response=$this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
+        $response->assertRedirect(route('settings.qr-provisioning'))->assertSessionHasErrors('configuration');
+        $errors=$response->getSession()->get('configuration_validation')['errors'];
+        $this->assertContains('The production API URL must use HTTPS.',$errors);$this->assertContains('The APK download URL must use HTTPS.',$errors);
+    }
+
+    public function test_qr_validation_reports_invalid_remote_responses(): void
+    {
+        $super=$this->user('super_admin');$this->saveQrValidationSettings();
+        Http::fake([
+            'https://manage.example.com/api/v1/health'=>Http::response(['success'=>false],200),
+            'https://manage.example.com/deviceguard-1.0.2.apk'=>Http::response('x',200,['Content-Type'=>'text/html','Content-Length'=>'1']),
+        ]);
+        $response=$this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
+        $response->assertRedirect(route('settings.qr-provisioning'))->assertSessionHasErrors('configuration');
+        $errors=$response->getSession()->get('configuration_validation')['errors'];
+        $this->assertContains('API returned an invalid response.',$errors);$this->assertContains('APK content type is incorrect.',$errors);
+    }
+
+    public function test_qr_settings_page_has_csrf_protected_validation_form_and_displays_results(): void
+    {
+        $super=$this->user('super_admin');
+        $response=$this->actingAs($super)->withSession(['configuration_validation'=>['passed'=>false,'checks'=>['API health endpoint'=>['passed'=>false,'message'=>'Failed.']],'errors'=>['API health endpoint is unreachable.']]])->get(route('settings.qr-provisioning'));
+        $response->assertOk()->assertSee('action="'.route('settings.qr-provisioning.validate').'"',false)->assertSee('name="_token"',false)->assertSee('Configuration validation needs attention')->assertSee('API health endpoint is unreachable.');
     }
 
     public function test_qr_settings_save_without_wifi_and_omit_wifi_extras(): void

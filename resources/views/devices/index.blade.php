@@ -51,7 +51,7 @@
                     
                     @if(auth()->user()->isSuperAdmin())
                     <details class="group">
-                        <summary class="danger-button w-full cursor-pointer list-none text-center marker:hidden mt-2">Delete Permanently</summary>
+                        <summary class="danger-button w-full cursor-pointer list-none text-center marker:hidden mt-2">Permanently Delete</summary>
                         <form method="post" action="{{ route('devices.destroy',$device->id) }}" class="mt-2 space-y-3 rounded-xl border border-red-200 bg-red-50 p-4">
                             @csrf @method('delete')
                             <p class="text-xs text-red-700 font-semibold">Warning: This action cannot be undone.</p>
