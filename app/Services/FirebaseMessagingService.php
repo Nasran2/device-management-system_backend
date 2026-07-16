@@ -14,14 +14,14 @@ class FirebaseMessagingService
         return filled(config('services.firebase.project_id')) && is_readable((string) config('services.firebase.credentials'));
     }
 
-    public function send(DeviceCommand $command): void
+    public function send(DeviceCommand $command): string
     {
         if (! $this->configured() || blank($command->device->fcm_token)) {
-            return;
+            throw new RuntimeException('Firebase is not configured or this device has no FCM token.');
         }
 
         $project = config('services.firebase.project_id');
-        Http::withToken($this->accessToken())->timeout(15)->post("https://fcm.googleapis.com/v1/projects/{$project}/messages:send", [
+        $response = Http::withToken($this->accessToken())->timeout(15)->post("https://fcm.googleapis.com/v1/projects/{$project}/messages:send", [
             'message' => [
                 'token' => $command->device->fcm_token,
                 'data' => [
@@ -32,9 +32,11 @@ class FirebaseMessagingService
                     'expires_at' => $command->expires_at->toISOString(),
                     'sync_required' => 'true',
                 ],
-                'android' => ['priority' => 'high', 'ttl' => max(0, now()->diffInSeconds($command->expires_at)).'s'],
+                'android' => ['priority' => in_array($command->type, ['LOCK_DEVICE','UNLOCK_DEVICE'], true) ? 'high' : 'normal', 'ttl' => max(0, now()->diffInSeconds($command->expires_at)).'s'],
             ],
         ])->throw();
+
+        return (string) $response->json('name');
     }
 
     private function accessToken(): string

@@ -72,6 +72,11 @@ class DeviceController extends Controller
                 'APK signing checksum configured' => filled(SystemSetting::value('provisioning_apk_checksum')),
                 'Management PIN configured' => filled($device->management_pin_hash),
             ],
+            'queueDiagnostics' => [
+                'connection' => config('queue.default'),
+                'pending_jobs' => DB::table('jobs')->count(),
+                'last_firebase_result' => $device->commands()->whereNotNull('firebase_attempted_at')->latest('firebase_attempted_at')->first(),
+            ],
         ]);
     }
 

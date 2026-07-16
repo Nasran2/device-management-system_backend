@@ -13,7 +13,8 @@ class CommandController extends Controller
     public function index(Request $request)
     {
         $device = $request->attributes->get('device');
-        $commands = $device->commands()->whereIn('status', ['pending', 'queued', 'sent'])->where('expires_at', '>', now())->oldest()->get();
+        $device->commands()->whereIn('status', ['pending','dispatched','delivered','executing'])->where('expires_at', '<=', now())->update(['status'=>'failed','failure_code'=>'COMMAND_EXPIRED','result_message'=>'Command expired before execution.','executed_at'=>now()]);
+        $commands = $device->commands()->whereIn('status', ['pending', 'dispatched', 'delivered'])->where('expires_at', '>', now())->oldest()->get();
         Log::info('Pending commands requested', ['device_uuid' => $device->uuid, 'command_count' => $commands->count()]);
 
         return response()->json(['data' => $commands]);
@@ -26,6 +27,14 @@ class CommandController extends Controller
         $command->update(['status' => 'delivered', 'delivered_at' => now()]);
 
         return response()->json(['message' => 'Delivery acknowledged.']);
+    }
+
+    public function executing(Request $request, DeviceCommand $command)
+    {
+        $device = $request->attributes->get('device');
+        abort_unless($command->device_id === $device->id, 404);
+        if (! in_array($command->status, ['completed','failed'], true)) $command->update(['status'=>'executing','executing_at'=>now()]);
+        return response()->json(['message'=>'Execution acknowledged.']);
     }
 
     public function result(Request $request, DeviceCommand $command, AuditService $audit)
@@ -53,7 +62,7 @@ class CommandController extends Controller
             $device->update($updates + ['last_seen_at' => now()]);
             if ($command->type === 'PERMANENT_RELEASE') {
                 $device->tokens()->whereNull('revoked_at')->update(['revoked_at' => now()]);
-                $device->commands()->where('id', '!=', $command->id)->whereIn('status', ['pending', 'queued', 'sent'])->update(['status' => 'cancelled']);
+                $device->commands()->where('id', '!=', $command->id)->whereIn('status', ['pending', 'dispatched', 'delivered', 'executing'])->update(['status' => 'cancelled']);
             }
         } else {
             $device->update([

@@ -9,6 +9,7 @@ use App\Models\DeviceToken;
 use App\Models\SystemSetting;
 use App\Models\User;
 use App\Services\CommandService;
+use App\Services\FirebaseMessagingService;
 use App\Services\QrProvisioningService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
@@ -100,6 +101,29 @@ class DeviceManagementTest extends TestCase
         $this->assertTrue(app(CommandService::class)->verify($command));
         $this->assertSame('lock_requested', $device->fresh()->status);
         $this->assertSame('unlocked', $device->fresh()->lock_status);
+    }
+
+    public function test_critical_command_dispatches_firebase_immediately_even_with_database_queue(): void
+    {
+        config(['queue.default'=>'database']);
+        $admin=$this->user();$device=$this->device($admin,['fcm_token'=>'phone-fcm-token']);
+        $firebase=\Mockery::mock(FirebaseMessagingService::class);
+        $firebase->shouldReceive('send')->once()->with(\Mockery::on(fn($command)=>$command->type==='UNLOCK_DEVICE'&&$command->device->uuid===$device->uuid))->andReturn('projects/test/messages/123');
+        app()->instance(FirebaseMessagingService::class,$firebase);
+
+        $command=app(CommandService::class)->create($device,'UNLOCK_DEVICE',[],$admin);
+
+        $this->assertSame('dispatched',$command->status);$this->assertNotNull($command->dispatched_at);$this->assertSame('projects/test/messages/123',$command->firebase_message_id);$this->assertDatabaseCount('jobs',0);
+    }
+
+    public function test_command_delivery_and_execution_have_separate_statuses(): void
+    {
+        $admin=$this->user();$device=$this->device($admin);$plain='status-token';
+        DeviceToken::create(['device_id'=>$device->id,'token_hash'=>hash('sha256',$plain)]);
+        $command=app(CommandService::class)->create($device,'SYNC_DEVICE',[],$admin);
+        $this->withToken($plain)->postJson("/api/v1/commands/{$command->id}/acknowledge")->assertOk();$this->assertSame('delivered',$command->fresh()->status);
+        $this->withToken($plain)->postJson("/api/v1/commands/{$command->id}/executing")->assertOk();$this->assertSame('executing',$command->fresh()->status);
+        $this->withToken($plain)->postJson("/api/v1/commands/{$command->id}/result",['success'=>true,'message'=>'Done'])->assertOk();$this->assertSame('completed',$command->fresh()->status);
     }
 
     public function test_released_device_rejects_commands(): void

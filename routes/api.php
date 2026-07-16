@@ -23,6 +23,7 @@ Route::prefix('v1')->middleware('throttle:api')->group(function () {
         Route::post('devices/capabilities', [DeviceSyncController::class, 'capabilities']);
         Route::get('commands', [CommandController::class, 'index']);
         Route::post('commands/{command}/acknowledge', [CommandController::class, 'acknowledge']);
+        Route::post('commands/{command}/executing', [CommandController::class, 'executing']);
         Route::post('commands/{command}/result', [CommandController::class, 'result']);
         Route::post('locations', [LocationController::class, 'store'])->middleware('throttle:120,1');
         Route::get('configuration', ConfigurationController::class);

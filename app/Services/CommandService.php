@@ -52,7 +52,8 @@ class CommandService
 
             return $command;
         });
-        SendDeviceCommand::dispatch($command->id)->afterCommit();
+        // Critical delivery must not wait for a shared-hosting queue worker.
+        SendDeviceCommand::dispatchSync($command->id);
 
         return $command->fresh();
     }

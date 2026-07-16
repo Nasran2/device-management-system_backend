@@ -16,7 +16,7 @@ class DeviceLifecycleController extends Controller
         $this->authorize('archive', $device);
         $this->password($request);
         DB::transaction(function () use ($device, $request, $audit) {
-            $device->commands()->whereIn('status', ['pending','queued','sent'])->update(['status' => 'cancelled', 'result_message' => 'Device archived']);
+            $device->commands()->whereIn('status', ['pending','dispatched','delivered','executing'])->update(['status' => 'cancelled', 'result_message' => 'Device archived']);
             $device->update(['archived_by' => $request->user()->id, 'status_before_archive' => $device->status]);
             $audit->record('DEVICE_ARCHIVED', 'Device archived', $request->user(), $device, [], $this->snapshot($device));
             $device->delete();

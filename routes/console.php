@@ -20,7 +20,7 @@ Schedule::call(function () {
 })->daily()->name('prune-device-locations')->withoutOverlapping();
 
 Schedule::call(function () {
-    DeviceCommand::with('device')->whereIn('status', ['pending', 'queued', 'sent'])->where('expires_at', '<=', now())->each(function ($command) {
+    DeviceCommand::with('device')->whereIn('status', ['pending', 'dispatched', 'delivered', 'executing'])->where('expires_at', '<=', now())->each(function ($command) {
         $command->update(['status' => 'failed', 'failure_code' => 'COMMAND_EXPIRED', 'result_message' => 'Command expired before execution.', 'executed_at' => now()]);
         $command->device->update([
             'status' => $command->previous_device_status ?: ($command->device->lock_status === 'locked' ? 'locked' : 'active_unlocked'),
