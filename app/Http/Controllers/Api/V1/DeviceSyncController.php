@@ -4,10 +4,11 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
+use App\Services\OfflineProtectionService;
 
 class DeviceSyncController extends Controller
 {
-    public function heartbeat(Request $request)
+    public function heartbeat(Request $request, OfflineProtectionService $offline)
     {
         $data = $request->validate([
             'battery_percentage' => ['nullable', 'integer', 'between:0,100'],
@@ -19,7 +20,17 @@ class DeviceSyncController extends Controller
         $device = $request->attributes->get('device');
         $device->update($data + ['last_seen_at' => now(), 'last_sync_at' => now()]);
 
-        return response()->json(['data' => ['server_time' => now()->toIso8601String(), 'status' => $device->fresh()->status]]);
+        $signedPolicy = $offline->issue($device->fresh());
+        $commands = $device->commands()->whereIn('status', ['pending', 'dispatched'])->where('expires_at', '>', now())->oldest()->get()
+            ->map->only(['id', 'uuid', 'type', 'payload', 'signature', 'expires_at', 'status']);
+
+        return response()->json(['data' => [
+            'server_utc_time' => now('UTC')->toIso8601String(),
+            'status' => $device->fresh()->status,
+            'lock_status' => $device->fresh()->lock_status,
+            'commands' => $commands,
+            'offline_policy' => $signedPolicy,
+        ]]);
     }
 
     public function capabilities(Request $request)

@@ -91,6 +91,11 @@ class Device extends Model
         return $this->hasMany(DeviceProvisioningToken::class);
     }
 
+    public function offlinePolicy()
+    {
+        return $this->hasOne(DeviceOfflinePolicy::class);
+    }
+
     public function scopeVisibleTo(Builder $query, User $user): Builder
     {
         return $user->isSuperAdmin() ? $query : $query->where('admin_id', $user->id);

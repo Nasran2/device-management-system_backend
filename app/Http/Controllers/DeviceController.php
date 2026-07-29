@@ -11,6 +11,7 @@ use App\Services\ActivationService;
 use App\Services\AuditService;
 use App\Services\CommandService;
 use App\Services\QrProvisioningService;
+use App\Services\OfflineProtectionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Crypt;
@@ -24,7 +25,19 @@ class DeviceController extends Controller
     {
         $devices = Device::visibleTo($request->user())->with(['customer', 'admin'])
             ->when($request->search, fn ($q, $term) => $q->where(fn ($q) => $q->where('brand', 'like', "%{$term}%")->orWhere('model', 'like', "%{$term}%")->orWhereHas('customer', fn ($c) => $c->where('name', 'like', "%{$term}%"))))
-            ->when($request->status, fn ($q, $status) => $q->where('status', $status))->latest()->paginate(15)->withQueryString();
+            ->when($request->status, fn ($q, $status) => $q->where('status', $status))
+            ->when($request->offline_filter, function ($q, $filter) {
+                match ($filter) {
+                    'offline_24h' => $q->where('last_seen_at', '<', now()->subDay()),
+                    'deadline_24h' => $q->whereHas('offlinePolicy', fn ($p) => $p->whereBetween('offline_deadline_at', [now(), now()->addDay()])),
+                    'deadline_6h' => $q->whereHas('offlinePolicy', fn ($p) => $p->whereBetween('offline_deadline_at', [now(), now()->addHours(6)])),
+                    'offline_locked' => $q->whereHas('offlinePolicy', fn ($p) => $p->where('phone_local_locked', true)),
+                    'disabled' => $q->whereHas('offlinePolicy', fn ($p) => $p->where('enabled', false)),
+                    'global' => $q->whereHas('offlinePolicy', fn ($p) => $p->where('uses_global_default', true)),
+                    'override' => $q->whereHas('offlinePolicy', fn ($p) => $p->where('uses_global_default', false)),
+                    default => $q,
+                };
+            })->latest()->paginate(15)->withQueryString();
 
         return view('devices.index', compact('devices'));
     }
@@ -34,9 +47,9 @@ class DeviceController extends Controller
         return view('devices.create');
     }
 
-    public function store(StoreDeviceRequest $request, ActivationService $activations, AuditService $audit)
+    public function store(StoreDeviceRequest $request, ActivationService $activations, AuditService $audit, OfflineProtectionService $offline)
     {
-        [$device, $code] = DB::transaction(function () use ($request, $activations, $audit) {
+        [$device, $code] = DB::transaction(function () use ($request, $activations, $audit, $offline) {
             $customer = Customer::create(['admin_id' => $request->user()->id, 'name' => $request->customer_name, 'phone' => $request->customer_phone, 'address' => $request->customer_address]);
             $data = $request->safe()->except(['customer_name', 'customer_phone', 'customer_address', 'management_pin', 'management_pin_confirmation']);
             $data['admin_id'] = $request->user()->id;
@@ -48,6 +61,8 @@ class DeviceController extends Controller
             $data['management_pin_changed_at'] = now();
             $data['management_pin_changed_by'] = $request->user()->id;
             $device = Device::create($data);
+            $policy = $offline->policyFor($device);
+            $offline->audit($device, 'POLICY_CREATED', $policy, $request->user(), ['source' => 'global_default']);
             $code = $activations->issue($device);
             $audit->record('device_registered', 'Device registered', $request->user(), $device);
             $audit->record('MANAGEMENT_PIN_CREATED', 'Device management PIN created', $request->user(), $device);
@@ -58,12 +73,14 @@ class DeviceController extends Controller
         return redirect()->route('devices.show', $device)->with('success', 'Device registered.')->with('activation_code', $code);
     }
 
-    public function show(Device $device, QrProvisioningService $qr)
+    public function show(Device $device, QrProvisioningService $qr, OfflineProtectionService $offline)
     {
         $this->authorize('view', $device);
 
         return view('devices.show', [
-            'device' => $device->load(['customer', 'admin', 'managementPinChangedBy', 'commands.requester', 'locations']),
+            'device' => $device->load(['customer', 'admin', 'managementPinChangedBy', 'commands.requester', 'locations', 'offlinePolicy.audits']),
+            'offlinePolicy' => $offline->policyFor($device),
+            'offlineGlobal' => \App\Models\OfflineProtectionSetting::current(),
             'qrConfigured' => $qr->configured(),
             'qrReadiness' => [
                 'QR provisioning enabled' => (bool) SystemSetting::value('qr_provisioning_enabled', false),
@@ -112,11 +129,12 @@ class DeviceController extends Controller
         return back()->with('success', 'Command queued. The status will change only after the phone confirms execution.');
     }
 
-    public function release(Request $request, Device $device, CommandService $commands)
+    public function release(Request $request, Device $device, CommandService $commands, OfflineProtectionService $offline)
     {
         $this->authorize('control', $device);
         $data = $request->validate(['password' => ['required', 'current_password'], 'reason' => ['required', 'string', 'max:1000'], 'confirmed' => ['accepted']]);
-        $commands->create($device, 'PERMANENT_RELEASE', ['reason' => $data['reason']], $request->user());
+        $offline->permanentRelease($device, $request->user(), $data['reason']);
+        $commands->create($device, 'PERMANENT_RELEASE', ['reason' => $data['reason'], 'offline_protection_disabled' => true], $request->user());
 
         return back()->with('success', 'Permanent release has been queued for device confirmation.');
     }

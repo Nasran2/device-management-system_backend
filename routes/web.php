@@ -7,6 +7,9 @@ use App\Http\Controllers\DeviceManagementPinController;
 use App\Http\Controllers\DeviceProvisioningController;
 use App\Http\Controllers\DeviceLifecycleController;
 use App\Http\Controllers\QrProvisioningSettingsController;
+use App\Http\Controllers\OfflineProtectionSettingsController;
+use App\Http\Controllers\DeviceOfflineProtectionController;
+use App\Http\Controllers\OfflineProtectionReportController;
 use Illuminate\Support\Facades\Route;
 
 Route::redirect('/', '/dashboard');
@@ -25,6 +28,9 @@ Route::middleware('auth')->group(function () {
     Route::delete('/devices/bulk', [DeviceLifecycleController::class, 'bulkDelete'])->middleware('throttle:3,1')->name('devices.bulk-delete');
     Route::post('/devices/{device}/commands', [DeviceController::class, 'command'])->middleware('throttle:5,1')->name('devices.command');
     Route::post('/devices/{device}/release', [DeviceController::class, 'release'])->middleware('throttle:5,1')->name('devices.release');
+    Route::put('/devices/{device}/offline-protection', [DeviceOfflineProtectionController::class, 'update'])->name('devices.offline-protection.update');
+    Route::post('/devices/{device}/offline-protection/refresh', [DeviceOfflineProtectionController::class, 'refresh'])->name('devices.offline-protection.refresh');
+    Route::post('/devices/{device}/offline-protection/recalculate', [DeviceOfflineProtectionController::class, 'recalculate'])->name('devices.offline-protection.recalculate');
     Route::post('/devices/{device}/unlock-code', [DeviceController::class, 'generateUnlockCode'])->middleware('throttle:5,1')->name('devices.unlock-code');
     Route::post('/devices/{device}/management-pin/reveal', [DeviceManagementPinController::class, 'reveal'])->middleware('throttle:5,1')->name('devices.management-pin.reveal');
     Route::post('/devices/{device}/management-pin/change', [DeviceManagementPinController::class, 'change'])->middleware('throttle:5,1')->name('devices.management-pin.change');
@@ -37,5 +43,8 @@ Route::middleware('auth')->group(function () {
     Route::get('/settings/qr-provisioning', [QrProvisioningSettingsController::class, 'edit'])->name('settings.qr-provisioning');
     Route::put('/settings/qr-provisioning', [QrProvisioningSettingsController::class, 'update'])->name('settings.qr-provisioning.update');
     Route::post('/settings/qr-provisioning/validate', [QrProvisioningSettingsController::class, 'validateConfiguration'])->name('settings.qr-provisioning.validate');
+    Route::get('/settings/offline-protection', [OfflineProtectionSettingsController::class, 'edit'])->name('settings.offline-protection');
+    Route::put('/settings/offline-protection', [OfflineProtectionSettingsController::class, 'update'])->name('settings.offline-protection.update');
+    Route::get('/reports/offline-protection', OfflineProtectionReportController::class)->name('reports.offline-protection');
     Route::post('/logout', [AuthController::class, 'destroy'])->name('logout');
 });

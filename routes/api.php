@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\V1\DeviceSyncController;
 use App\Http\Controllers\Api\V1\LocationController;
 use App\Http\Controllers\Api\V1\ManagementPinController;
 use App\Http\Controllers\Api\V1\ProvisioningEnrollmentController;
+use App\Http\Controllers\Api\V1\OfflineProtectionController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->middleware('throttle:api')->group(function () {
@@ -21,6 +22,8 @@ Route::prefix('v1')->middleware('throttle:api')->group(function () {
     Route::middleware('device.auth')->group(function () {
         Route::post('devices/heartbeat', [DeviceSyncController::class, 'heartbeat']);
         Route::post('devices/capabilities', [DeviceSyncController::class, 'capabilities']);
+        Route::post('devices/offline-policy/acknowledge', [OfflineProtectionController::class, 'acknowledge']);
+        Route::post('devices/offline-events', [OfflineProtectionController::class, 'events']);
         Route::get('commands', [CommandController::class, 'index']);
         Route::post('commands/{command}/acknowledge', [CommandController::class, 'acknowledge']);
         Route::post('commands/{command}/executing', [CommandController::class, 'executing']);
