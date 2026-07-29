@@ -8,6 +8,8 @@ use App\Models\DeviceCommand;
 use App\Models\DeviceLocation;
 use App\Models\SystemSetting;
 use App\Models\User;
+use App\Models\Shop;
+use App\Models\DeviceCommission;
 use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Str;
@@ -27,6 +29,10 @@ class DatabaseSeeder extends Seeder
             User::create(['name' => 'Demo Admin', 'email' => 'admin@example.com', 'password' => 'Password@123', 'role' => 'admin', 'phone' => '+94 77 100 2000', 'business_name' => 'Colombo Branch', 'is_active' => true, 'can_view_locations' => true]),
             User::create(['name' => 'Kandy Admin', 'email' => 'kandy@example.com', 'password' => 'Password@123', 'role' => 'admin', 'phone' => '+94 77 300 4000', 'business_name' => 'Kandy Branch', 'is_active' => true, 'can_view_locations' => false]),
         ]);
+        $admins->each(function (User $admin) {
+            $shop = Shop::create(['name'=>$admin->business_name ?: $admin->name."'s Shop",'owner_name'=>$admin->name,'email'=>$admin->email,'mobile'=>$admin->phone ?: 'Not provided','address'=>$admin->address ?: 'Demo address','reference_code'=>'SHOP-'.str_pad((string)$admin->id,6,'0',STR_PAD_LEFT),'commission_percentage'=>5,'commission_basis'=>'selling_price_percentage','status'=>'active','created_by'=>1]);
+            $admin->update(['shop_id'=>$shop->id,'role'=>'shop_owner']);
+        });
 
         foreach (['super_admin', 'admin'] as $role) {
             Role::firstOrCreate(['name' => $role, 'guard_name' => 'web']);
@@ -47,10 +53,10 @@ class DatabaseSeeder extends Seeder
         $brands = [['Samsung', 'Galaxy A15'], ['Xiaomi', 'Redmi Note 13'], ['OPPO', 'A58'], ['Vivo', 'Y27'], ['Samsung', 'Galaxy A25']];
         foreach ($statuses as $index => $status) {
             $admin = $admins[$index % 2];
-            $customer = Customer::create(['admin_id' => $admin->id, 'name' => 'Demo Customer '.($index + 1), 'phone' => '+94 77 '.str_pad((string) (1000000 + $index), 7, '0', STR_PAD_LEFT), 'address' => 'Demo address']);
+            $customer = Customer::create(['shop_id'=>$admin->shop_id,'admin_id' => $admin->id,'created_by'=>$admin->id, 'name' => 'Demo Customer '.($index + 1), 'phone' => '+94 77 '.str_pad((string) (1000000 + $index), 7, '0', STR_PAD_LEFT), 'address' => 'Demo address']);
             [$brand, $model] = $brands[$index % count($brands)];
             $device = Device::create([
-                'admin_id' => $admin->id, 'customer_id' => $customer->id, 'brand' => $brand, 'model' => $model,
+                'shop_id'=>$admin->shop_id,'admin_id' => $admin->id, 'customer_id' => $customer->id, 'brand' => $brand, 'model' => $model,
                 'imei' => '86000000000'.str_pad((string) $index, 4, '0', STR_PAD_LEFT), 'selling_price' => 55000 + ($index * 7250), 'currency' => 'LKR',
                 'shop_branch' => $admin->business_name, 'support_phone' => $admin->phone, 'management_mode' => $index % 3 === 0 ? 'managed' : 'standard',
                 'is_device_owner' => $index % 3 === 0, 'can_block_uninstall' => $index % 3 === 0, 'can_block_reset' => $index % 3 === 0,
@@ -59,6 +65,7 @@ class DatabaseSeeder extends Seeder
                 'location_permission_status' => 'granted', 'background_location_permission_status' => 'granted', 'notification_permission_status' => 'granted', 'gps_status' => 'enabled',
                 'last_seen_at' => $status === 'offline' ? now()->subHours(5) : now()->subMinutes($index * 3), 'released_at' => $status === 'permanently_released' ? now()->subDay() : null,
             ]);
+            DeviceCommission::create(['shop_id'=>$admin->shop_id,'device_id'=>$device->id,'captured_percentage'=>5,'calculation_basis'=>'selling_price_percentage','base_amount'=>$device->selling_price,'commission_amount'=>round((float)$device->selling_price*.05,2),'outstanding_amount'=>round((float)$device->selling_price*.05,2),'status'=>'outstanding']);
             if ($device->location_tracking_enabled) {
                 DeviceLocation::create(['device_id' => $device->id, 'latitude' => 6.9271 + ($index / 100), 'longitude' => 79.8612 + ($index / 100), 'accuracy' => 12, 'battery_percentage' => 80 - $index, 'gps_status' => 'enabled', 'network_status' => 'online', 'lock_status' => $device->lock_status, 'tracking_mode' => $device->tracking_mode, 'recorded_at' => now()->subMinutes($index * 3)]);
             }

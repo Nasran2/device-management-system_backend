@@ -95,10 +95,14 @@ class Device extends Model
     {
         return $this->hasOne(DeviceOfflinePolicy::class);
     }
+    public function shop(){return $this->belongsTo(Shop::class);}
+    public function financing(){return $this->hasOne(DeviceFinancing::class);}
+    public function commission(){return $this->hasOne(DeviceCommission::class);}
+    public function setupSessions(){return $this->hasMany(DeviceSetupSession::class);}
 
     public function scopeVisibleTo(Builder $query, User $user): Builder
     {
-        return $user->isSuperAdmin() ? $query : $query->where('admin_id', $user->id);
+        return $user->isSuperAdmin() ? $query : ($user->shop_id ? $query->where('shop_id',$user->shop_id) : $query->where('admin_id',$user->id));
     }
 
     public function getMaskedImeiAttribute(): string

@@ -12,7 +12,7 @@ use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 use Spatie\Permission\Traits\HasRoles;
 
-#[Fillable(['name', 'email', 'password', 'role', 'phone', 'business_name', 'address', 'is_active', 'can_view_locations', 'notes', 'last_login_at'])]
+#[Fillable(['shop_id','name', 'email', 'password', 'role','staff_role','shop_permissions', 'phone', 'business_name', 'address', 'is_active', 'can_view_locations', 'notes', 'last_login_at'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {
@@ -28,6 +28,20 @@ class User extends Authenticatable
     {
         return $this->role === 'super_admin';
     }
+    public function isShopOwner(): bool { return in_array($this->role,['admin','shop_owner'],true); }
+    public function shop(){return $this->belongsTo(Shop::class);}
+    public function canShop(string $permission): bool
+    {
+        $aliases = [
+            'devices' => 'devices.create',
+            'lock_unlock' => 'devices.lock',
+        ];
+
+        return $this->isShopOwner()
+            || $this->isSuperAdmin()
+            || in_array($permission, $this->shop_permissions ?? [], true)
+            || isset($aliases[$permission]) && in_array($aliases[$permission], $this->shop_permissions ?? [], true);
+    }
 
     /**
      * Get the attributes that should be cast.
@@ -42,6 +56,7 @@ class User extends Authenticatable
             'is_active' => 'boolean',
             'can_view_locations' => 'boolean',
             'last_login_at' => 'datetime',
+            'shop_permissions' => 'array',
         ];
     }
 }

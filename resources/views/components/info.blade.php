@@ -1,0 +1,2 @@
+@props(['text'])
+<button type="button" class="group relative ml-1 inline-grid size-5 place-items-center rounded-full bg-indigo-50 text-xs font-black text-indigo-700" aria-label="{{ $text }}">ⓘ<span class="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-64 -translate-x-1/2 rounded-xl bg-slate-950 p-3 text-left text-xs font-normal text-white shadow-xl group-hover:block group-focus:block">{{ $text }}</span></button>

@@ -13,6 +13,8 @@ class AuditService
         return AuditLog::create([
             'user_id' => $user?->id,
             'device_id' => $device?->id,
+            'shop_id' => $device?->shop_id ?? $user?->shop_id ?? ($after['shop_id'] ?? null),
+            'customer_id' => $device?->customer_id ?? ($after['customer_id'] ?? null),
             'action' => $action,
             'description' => $description,
             'previous_values' => $before ?: null,

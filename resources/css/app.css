@@ -9,9 +9,14 @@
 }
 
 @layer components {
-    .sidebar { @apply flex w-full flex-col bg-slate-950 lg:sticky lg:top-0 lg:h-screen lg:w-64 lg:shrink-0; }
-    .nav-link { @apply block rounded-xl px-4 py-3 text-sm font-semibold text-slate-300 transition hover:bg-slate-800 hover:text-white; }
+    .sidebar { @apply fixed inset-y-0 left-0 z-50 hidden h-screen w-72 flex-col bg-slate-950 lg:sticky lg:top-0 lg:flex lg:w-72 lg:shrink-0; }
+    .sidebar.open { @apply flex; }
+    .nav-link { @apply block rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-300 transition hover:bg-slate-800 hover:text-white; }
     .nav-link.active { @apply bg-indigo-600 text-white shadow-lg shadow-indigo-950/30; }
+    .nav-group { @apply rounded-xl border border-slate-800/70; }
+    .nav-group summary { @apply cursor-pointer select-none px-4 py-3 text-[11px] font-black uppercase tracking-[0.14em] text-slate-500 hover:text-slate-300; }
+    .nav-group[open] summary { @apply text-indigo-300; }
+    .nav-group > div { @apply space-y-0.5 px-1 pb-1; }
     .page-title { @apply text-3xl font-black tracking-tight text-slate-950 sm:text-4xl; }
     .page-copy, .section-copy { @apply mt-1 text-sm text-slate-500; }
     .eyebrow { @apply mb-2 text-xs font-bold uppercase tracking-[0.18em] text-indigo-600; }

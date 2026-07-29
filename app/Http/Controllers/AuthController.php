@@ -20,7 +20,7 @@ class AuthController extends Controller
         if (! Auth::attempt($credentials, $request->boolean('remember'))) {
             throw ValidationException::withMessages(['email' => 'The supplied credentials are invalid.']);
         }
-        if (! $request->user()->is_active) {
+        if (! $request->user()->is_active || ($request->user()->shop && $request->user()->shop->status !== 'active')) {
             Auth::logout();
             throw ValidationException::withMessages(['email' => 'This account is inactive.']);
         }

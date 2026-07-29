@@ -3,10 +3,12 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Customer extends Model
 {
-    protected $fillable = ['admin_id', 'name', 'phone', 'address'];
+    use SoftDeletes;
+    protected $guarded = ['id'];
 
     public function admin()
     {
@@ -17,4 +19,7 @@ class Customer extends Model
     {
         return $this->hasMany(Device::class);
     }
+    public function shop(){return $this->belongsTo(Shop::class);}
+    public function payments(){return $this->hasMany(CustomerPayment::class);}
+    public function smsLogs(){return $this->hasMany(SmsLog::class);}
 }

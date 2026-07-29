@@ -13,6 +13,7 @@ class OfflineProtectionSettingsController extends Controller
 {
     public function edit(Request $request)
     {
+        abort_unless($request->user()->isSuperAdmin(), 403);
         return view('settings.offline-protection', ['settings' => OfflineProtectionSetting::current()]);
     }
 

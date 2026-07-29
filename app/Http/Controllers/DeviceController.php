@@ -12,6 +12,10 @@ use App\Services\AuditService;
 use App\Services\CommandService;
 use App\Services\QrProvisioningService;
 use App\Services\OfflineProtectionService;
+use App\Services\FinancingService;
+use App\Services\CommissionService;
+use App\Services\SmsService;
+use App\Models\PhoneBrand;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Crypt;
@@ -42,17 +46,26 @@ class DeviceController extends Controller
         return view('devices.index', compact('devices'));
     }
 
-    public function create()
+    public function create(Request $request)
     {
-        return view('devices.create');
+        abort_unless($request->user()->isSuperAdmin() || $request->user()->canShop('devices'), 403);
+        abort_if($request->user()->shop && $request->user()->shop->status !== 'active', 403, 'This shop account is inactive.');
+        abort_if($request->user()->shop && ! $request->user()->shop->device_registration_enabled, 403, 'Device registration is disabled for this shop.');
+        return view('devices.create', [
+            'customers' => Customer::query()->when(!$request->user()->isSuperAdmin(), fn($q)=>$q->where('shop_id',$request->user()->shop_id))->orderBy('name')->get(),
+            'brands' => PhoneBrand::where('active',true)->orderBy('sort_order')->get(),
+        ]);
     }
 
-    public function store(StoreDeviceRequest $request, ActivationService $activations, AuditService $audit, OfflineProtectionService $offline)
+    public function store(StoreDeviceRequest $request, ActivationService $activations, AuditService $audit, OfflineProtectionService $offline, FinancingService $financing, CommissionService $commissions, SmsService $sms)
     {
-        [$device, $code] = DB::transaction(function () use ($request, $activations, $audit, $offline) {
-            $customer = Customer::create(['admin_id' => $request->user()->id, 'name' => $request->customer_name, 'phone' => $request->customer_phone, 'address' => $request->customer_address]);
-            $data = $request->safe()->except(['customer_name', 'customer_phone', 'customer_address', 'management_pin', 'management_pin_confirmation']);
+        [$device, $code] = DB::transaction(function () use ($request, $activations, $audit, $offline, $financing, $commissions) {
+            $customer = $request->customer_id
+                ? Customer::query()->when(!$request->user()->isSuperAdmin(),fn($q)=>$q->where('shop_id',$request->user()->shop_id))->findOrFail($request->customer_id)
+                : Customer::create(['shop_id'=>$request->user()->shop_id,'admin_id' => $request->user()->id,'created_by'=>$request->user()->id, 'name' => $request->customer_name, 'phone' => $request->customer_phone, 'address' => $request->customer_address]);
+            $data = $request->safe()->except(['customer_id','customer_name', 'customer_phone', 'customer_address', 'management_pin', 'management_pin_confirmation','first_payment','number_of_installments','first_due_date','payment_frequency','custom_frequency_days','installment_amount','custom_commission_amount']);
             $data['admin_id'] = $request->user()->id;
+            $data['shop_id'] = $request->user()->shop_id;
             $data['customer_id'] = $customer->id;
             $data['location_tracking_enabled'] = $request->boolean('location_tracking_enabled');
             $data['tracking_mode'] = $data['location_tracking_enabled'] ? 'locked_only' : 'disabled';
@@ -63,12 +76,22 @@ class DeviceController extends Controller
             $device = Device::create($data);
             $policy = $offline->policyFor($device);
             $offline->audit($device, 'POLICY_CREATED', $policy, $request->user(), ['source' => 'global_default']);
+            if ($request->filled('first_payment')) {
+                $finance=$financing->create($device,$request->only(['selling_price','first_payment','number_of_installments','first_due_date','payment_frequency','custom_frequency_days','installment_amount']));
+                if($request->user()->shop)$commissions->snapshot($device,$request->user()->shop,(float)$finance->financed_balance,$request->custom_commission_amount);
+                $audit->record('INSTALLMENT_SCHEDULE_CREATED','Financing and installment schedule created',$request->user(),$device);
+                $audit->record('COMMISSION_GENERATED','Device commission snapshot created',$request->user(),$device);
+            }
             $code = $activations->issue($device);
             $audit->record('device_registered', 'Device registered', $request->user(), $device);
             $audit->record('MANAGEMENT_PIN_CREATED', 'Device management PIN created', $request->user(), $device);
 
             return [$device, $code];
         });
+        if($device->shop_id && $request->user()->shop?->sms_enabled && in_array(\App\Models\SystemSetting::value('new_device_notification_mode','disabled'),['immediate','both'],true)){
+            $finance=$device->financing;$commission=$device->commission;
+            foreach(array_filter(array_map('trim',explode(',',(string)\App\Models\SystemSetting::value('new_device_sms_recipients','')))) as $recipient)$sms->send('new_device',$recipient,['shop_name'=>$device->shop->name,'customer_name'=>$device->customer->name,'phone_brand'=>$device->brand,'phone_model'=>$device->model,'selling_price'=>number_format((float)$device->selling_price,2),'first_payment'=>number_format((float)$finance?->first_payment,2),'months'=>$finance?->number_of_installments,'commission'=>number_format((float)$commission?->commission_amount,2),'commission_amount'=>number_format((float)$commission?->commission_amount,2),'commission_percentage'=>$commission?->captured_percentage,'device_reference'=>strtoupper(substr($device->uuid,0,8))],$device->shop_id,$device->customer_id,$device->id,$request->user());
+        }
 
         return redirect()->route('devices.show', $device)->with('success', 'Device registered.')->with('activation_code', $code);
     }
@@ -78,7 +101,7 @@ class DeviceController extends Controller
         $this->authorize('view', $device);
 
         return view('devices.show', [
-            'device' => $device->load(['customer', 'admin', 'managementPinChangedBy', 'commands.requester', 'locations', 'offlinePolicy.audits']),
+            'device' => $device->load(['customer', 'admin','shop', 'managementPinChangedBy', 'commands.requester', 'locations', 'offlinePolicy.audits','financing.installments','commission','setupSessions.steps']),
             'offlinePolicy' => $offline->policyFor($device),
             'offlineGlobal' => \App\Models\OfflineProtectionSetting::current(),
             'qrConfigured' => $qr->configured(),

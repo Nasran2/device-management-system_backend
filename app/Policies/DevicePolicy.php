@@ -7,6 +7,10 @@ use App\Models\User;
 
 class DevicePolicy
 {
+    private function tenant(User $user, Device $device): bool
+    {
+        return $user->shop_id ? $device->shop_id === $user->shop_id : $device->admin_id === $user->id;
+    }
     public function before(User $user): ?bool
     {
         return $user->isSuperAdmin() ? true : null;
@@ -14,22 +18,22 @@ class DevicePolicy
 
     public function view(User $user, Device $device): bool
     {
-        return $device->admin_id === $user->id;
+        return $this->tenant($user, $device);
     }
 
     public function update(User $user, Device $device): bool
     {
-        return $device->admin_id === $user->id && ! $device->isReleased();
+        return $this->tenant($user, $device) && ! $device->isReleased();
     }
 
     public function control(User $user, Device $device): bool
     {
-        return $device->admin_id === $user->id && ! $device->isReleased();
+        return $this->tenant($user, $device) && ! $device->isReleased() && ($user->shop?->lock_unlock_enabled ?? true) && $user->canShop('lock_unlock');
     }
 
     public function managePin(User $user, Device $device): bool
     {
-        return $device->admin_id === $user->id;
+        return $this->tenant($user, $device) && $user->canShop('devices');
     }
 
     public function resetPinAttempts(User $user, Device $device): bool
@@ -39,12 +43,12 @@ class DevicePolicy
 
     public function viewLocation(User $user, Device $device): bool
     {
-        return $device->admin_id === $user->id && $user->can_view_locations;
+        return $this->tenant($user, $device) && $user->can_view_locations;
     }
 
     public function archive(User $user, Device $device): bool
     {
-        return $device->admin_id === $user->id;
+        return $this->tenant($user, $device);
     }
 
     public function restore(User $user, Device $device): bool
