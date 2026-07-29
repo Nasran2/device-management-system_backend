@@ -53,7 +53,7 @@
                     <a class="nav-link {{ request()->routeIs('settings.system') && request()->route('section')==='device' ? 'active' : '' }}" href="{{ route('settings.system','device') }}">Device Settings</a>
                     <a class="nav-link {{ request()->routeIs('settings.qr-provisioning*') ? 'active' : '' }}" href="{{ route('settings.qr-provisioning') }}">APK & Provisioning</a>
                     <a class="nav-link {{ request()->routeIs('phone-brands.*') ? 'active' : '' }}" href="{{ route('phone-brands.index') }}">Phone Brands</a>
-                    <a class="nav-link {{ request()->routeIs('settings.system') && request()->route('section')==='setup-instructions' ? 'active' : '' }}" href="{{ route('settings.system','setup-instructions') }}">Setup Instructions</a>
+                    <a class="nav-link {{ request()->routeIs('setup-instructions.*') ? 'active' : '' }}" href="{{ route('setup-instructions.index') }}">Setup Instructions</a>
                     <a class="nav-link {{ request()->routeIs('settings.system') && request()->route('section')==='roles' ? 'active' : '' }}" href="{{ route('settings.system','roles') }}">User Roles & Permissions</a>
                     <a class="nav-link {{ request()->routeIs('settings.audit-logs') ? 'active' : '' }}" href="{{ route('settings.audit-logs') }}">Audit Logs</a>
                 </div></details>

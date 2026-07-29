@@ -12,7 +12,7 @@ use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 use Spatie\Permission\Traits\HasRoles;
 
-#[Fillable(['shop_id','name', 'email', 'password', 'role','staff_role','shop_permissions', 'phone', 'business_name', 'address', 'is_active', 'can_view_locations', 'notes', 'last_login_at'])]
+#[Fillable(['shop_id','name', 'username', 'email', 'password', 'role','staff_role','shop_permissions', 'phone', 'business_name', 'address', 'is_active', 'can_view_locations', 'notes', 'last_login_at'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {

@@ -16,6 +16,7 @@ use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\CustomerPaymentController;
 use App\Http\Controllers\PlatformCommissionController;
 use App\Http\Controllers\DeviceSetupController;
+use App\Http\Controllers\SetupInstructionController;
 use App\Http\Controllers\SmsSettingsController;
 use App\Http\Controllers\BusinessReportController;
 use App\Http\Controllers\PhoneBrandController;
@@ -83,6 +84,10 @@ Route::middleware('auth')->group(function () {
     Route::get('/setup/{setup}', [DeviceSetupController::class,'show'])->name('setup.show');
     Route::post('/setup/{setup}/step', [DeviceSetupController::class,'step'])->name('setup.step');
     Route::get('/setup/{setup}/helper/{os}', [DeviceSetupController::class,'helper'])->middleware('signed')->name('setup.helper');
+    Route::get('/settings/setup-instructions', [SetupInstructionController::class, 'index'])->name('setup-instructions.index');
+    Route::post('/settings/setup-instructions/sync', [SetupInstructionController::class, 'sync'])->name('setup-instructions.sync');
+    Route::get('/settings/setup-instructions/{instruction}/edit', [SetupInstructionController::class, 'edit'])->name('setup-instructions.edit');
+    Route::put('/settings/setup-instructions/{instruction}', [SetupInstructionController::class, 'update'])->name('setup-instructions.update');
     Route::get('/settings/sms', [SmsSettingsController::class,'edit'])->name('settings.sms');
     Route::get('/communication/sms-logs', [SmsSettingsController::class,'logs'])->name('sms.logs');
     Route::put('/settings/sms', [SmsSettingsController::class,'update'])->name('settings.sms.update');

@@ -1,15 +1,247 @@
 <?php
+
 namespace App\Http\Controllers;
-use App\Models\Device;use App\Models\DeviceSetupSession;use App\Models\SystemSetting;use App\Services\AuditService;use Illuminate\Http\Request;use Illuminate\Support\Facades\URL;use Illuminate\Support\Str;
-class DeviceSetupController extends Controller{
- public function index(Request $r){abort_unless($r->user()->isSuperAdmin()||$r->user()->canShop('setup.manage'),403);$sessions=DeviceSetupSession::with(['device.customer'])->when(!$r->user()->isSuperAdmin(),fn($q)=>$q->where('shop_id',$r->user()->shop_id))->latest()->paginate(30);$devices=Device::visibleTo($r->user())->whereDoesntHave('setupSessions',fn($q)=>$q->where('status','in_progress'))->with('customer')->latest()->limit(100)->get();return view('setup.index',compact('sessions','devices'));}
- public function start(Request $r,Device $device,AuditService $audit){$this->authorize('view',$device);abort_unless($r->user()->canShop('setup.manage'),403);$d=$r->validate(['computer_os'=>['required','in:macos,windows'],'brand_group'=>['required','in:samsung,xiaomi,oppo,vivo,standard,transsion,other'],'authorized'=>['accepted']]);$session=DeviceSetupSession::firstOrCreate(['device_id'=>$device->id,'status'=>'in_progress'],['uuid'=>(string)Str::uuid(),'shop_id'=>$device->shop_id,'started_by'=>$r->user()->id]+$d);if($session->wasRecentlyCreated)$audit->record('SETUP_STARTED','Authorized guided device setup started',$r->user(),$device,[],['computer_os'=>$d['computer_os'],'brand_group'=>$d['brand_group']]);return redirect()->route('setup.show',$session);}
- public function show(Request $r,DeviceSetupSession $setup){$this->tenant($r,$setup);$steps=$this->steps($setup->computer_os,$setup->brand_group);return view('setup.show',['setup'=>$setup->load('device'),'steps'=>$steps,'helperUrl'=>URL::temporarySignedRoute('setup.helper',now()->addMinutes(15),['setup'=>$setup,'os'=>$setup->computer_os])]);}
- public function step(Request $r,DeviceSetupSession $setup,AuditService $audit){$this->tenant($r,$setup);abort_unless($r->user()->canShop('setup.manage'),403);$d=$r->validate(['step'=>['required','integer','min:1'],'direction'=>['nullable','in:previous,next'],'completed'=>['nullable','boolean'],'notes'=>['nullable','string','max:1000']]);$steps=$this->steps($setup->computer_os,$setup->brand_group);abort_if($d['step']>count($steps),422);if(($d['direction']??'next')==='previous'){$setup->update(['current_step'=>max(1,$d['step']-1)]);return redirect()->route('setup.show',$setup);}$key=$steps[$d['step']-1]['key'];$setup->steps()->updateOrCreate(['step_key'=>$key],['completed'=>$r->boolean('completed'),'completed_at'=>$r->boolean('completed')?now():null,'notes'=>$d['notes']??null]);$next=min(count($steps),$d['step']+1);$setup->update(['current_step'=>$next]);if($d['step']===count($steps)&&$r->boolean('completed')){$setup->update(['status'=>'completed','completed_by'=>$r->user()->id,'completed_at'=>now()]);$audit->record('SETUP_COMPLETED','Guided setup checklist completed',$r->user(),$setup->device);}return redirect()->route('setup.show',$setup)->with('success','Setup progress saved.');}
- public function helper(Request $r,DeviceSetupSession $setup,string $os){abort_unless($r->hasValidSignature(),403);$this->tenant($r,$setup);abort_unless($os===$setup->computer_os,403);$url=SystemSetting::value('provisioning_apk_url');$sum=SystemSetting::value('provisioning_apk_checksum');abort_unless($url&&str_starts_with($url,'https://'),422,'A trusted HTTPS APK URL must be configured.');$script=$os==='macos'?$this->macScript($url,$sum):$this->windowsScript($url,$sum,SystemSetting::value('windows_platform_tools_url'),SystemSetting::value('windows_platform_tools_checksum'));return response($script)->header('Content-Type','text/plain')->header('Content-Disposition','attachment; filename="deviceguard-setup.'.($os==='macos'?'sh':'ps1').'"');}
- private function tenant(Request $r,DeviceSetupSession $s){abort_unless($r->user()->isSuperAdmin()||$s->shop_id===$r->user()->shop_id,403);}
- private function steps(string $os,string $brand):array{$mac=['Confirm authorized setup, customer agreement, and backup','Check macOS version','Check ADB; install official Android platform tools with Homebrew only if missing','Verify adb version','Prepare the reset phone without restoring accounts','Enable Developer Options','Enable USB debugging','Connect the USB cable','Authorize this Mac and run adb devices','Download and verify the configured DeviceGuard APK','Install with adb install -r -t','Confirm package with adb shell pm path com.twinsofte.deviceguard','Confirm no accounts with adb shell dumpsys account','Set Device Owner after explicit confirmation','Verify Device Owner','Open and activate DeviceGuard','Confirm FCM, capabilities, sync, and offline policy','Run lock, unlock, and reboot verification checklist'];$win=['Confirm authorized setup, customer agreement, and backup','Check Windows version and architecture','Check ADB; download approved platform-tools only if missing','Check official brand USB driver guidance','Run adb devices','Authorize the Windows computer','Download and verify DeviceGuard APK','Install with adb install -r -t deviceguard.apk','Confirm package installation','Confirm no accounts','Set Device Owner after explicit confirmation','Verify Device Owner','Activate DeviceGuard','Confirm capabilities, FCM, sync, and offline policy','Finish lock, unlock, offline, and reboot tests'];$items=$os==='macos'?$mac:$win;$brandNote=match($brand){'samsung'=>'Samsung: temporarily disable Auto Blocker only if it blocks authorized installation; enable unrestricted battery, notifications and Never sleeping apps.','xiaomi'=>'Xiaomi/Redmi/POCO: enable Install via USB/security settings as required, remove Mi account before Device Owner, then enable autostart and No restrictions.','oppo'=>'OPPO/Realme/OnePlus: enable USB installation, background activity, unrestricted battery and autostart where available.','vivo'=>'Vivo/iQOO: enable USB installation, autostart and high background power use.','transsion'=>'Tecno/Infinix: follow manufacturer USB driver, autostart and unrestricted battery guidance.',default=>'Use the standard Android Device Owner setup and manufacturer-approved USB drivers.'};array_splice($items,$os==='macos'?5:4,0,$brandNote);return collect($items)->values()->map(fn($v,$i)=>['key'=>'step_'.($i+1),'title'=>$v,'command'=>$this->commandFor($v,$os)])->all();}
- private function commandFor($v,$os){foreach(['adb version','adb devices','adb install -r -t','adb shell pm path','adb shell dumpsys account','dpm set-device-owner','adb shell dumpsys device_policy'] as $c)if(str_contains(strtolower($v),strtolower(str_replace('adb ','',$c))))return $c;return null;}
- private function macScript($url,$sum){return "#!/bin/sh\nset -eu\nprintf 'I confirm that this shop owns or is authorized to manage this phone and that the customer has agreed to the device-management terms. Continue? [y/N] '; read ok; [ \"\$ok\" = y ] || exit 1\nif ! command -v adb >/dev/null; then\n  command -v brew >/dev/null || { echo 'Homebrew is missing. Follow official guidance at https://brew.sh and rerun this helper.'; exit 2; }\n  printf 'Install official Android Platform Tools with Homebrew now? [y/N] '; read install; [ \"\$install\" = y ] || exit 2\n  brew install android-platform-tools\nfi\nadb version\nadb devices\ncurl -fL ".escapeshellarg($url)." -o deviceguard.apk\n".($sum?"echo ".escapeshellarg($sum)."  deviceguard.apk | shasum -a 256 -c -\n":"")."adb install -r -t deviceguard.apk\nadb shell pm path com.twinsofte.deviceguard\nadb shell dumpsys account\necho 'Remove accounts manually if listed. This script will not remove them.'\nprintf 'Set Device Owner now? [y/N] '; read own; [ \"\$own\" = y ] || exit 0\nadb shell dpm set-device-owner com.twinsofte.deviceguard/.devicepolicy.DevicePolicyReceiver\nadb shell dumpsys device_policy\necho 'Setup summary: ADB connected, APK verified/installed, package checked, Device Owner command completed. Activate DeviceGuard and verify FCM, capabilities and last sync in the dashboard.'\n";}
- private function windowsScript($url,$sum,$toolsUrl,$toolsSum){$url=str_replace("'","''",$url);$toolsUrl=str_replace("'","''",(string)$toolsUrl);return "\$ErrorActionPreference='Stop'\nif ((Read-Host 'I confirm that this shop owns or is authorized to manage this phone and that the customer has agreed to the device-management terms (type YES)') -ne 'YES') { exit 1 }\nif (-not (Get-Command adb -ErrorAction SilentlyContinue)) {\n".($toolsUrl&&$toolsSum?"  Write-Host 'ADB is missing. Downloading the Super Admin-approved official Platform Tools archive.'\n  Invoke-WebRequest -Uri '$toolsUrl' -OutFile platform-tools.zip\n  if ((Get-FileHash platform-tools.zip -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($toolsSum)."') { throw 'Platform Tools checksum mismatch' }\n  Expand-Archive -Path platform-tools.zip -DestinationPath . -Force\n  \$env:Path = \"\$PWD\\platform-tools;\" + \$env:Path\n":"  throw 'ADB is missing and no approved Platform Tools URL/checksum is configured. Ask the Super Admin to configure it.'\n")."}\nadb version\nadb devices\nInvoke-WebRequest -Uri '$url' -OutFile deviceguard.apk\n".($sum?"if ((Get-FileHash deviceguard.apk -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($sum)."') { throw 'APK checksum mismatch' }\n":"")."adb install -r -t deviceguard.apk\nadb shell pm path com.twinsofte.deviceguard\nadb shell dumpsys account\nWrite-Host 'Remove accounts manually if listed. The helper never removes accounts.'\nif ((Read-Host 'Set Device Owner now? (YES)') -eq 'YES') { adb shell dpm set-device-owner com.twinsofte.deviceguard/.devicepolicy.DevicePolicyReceiver; adb shell dumpsys device_policy }\nWrite-Host 'Setup summary: ADB connected, APK verified/installed, package checked, and Device Owner verification attempted. Activate DeviceGuard and verify capabilities, FCM and last sync in the dashboard.'\n";}
+
+use App\Models\Device;
+use App\Models\DeviceSetupInstruction;
+use App\Models\DeviceSetupSession;
+use App\Models\SystemSetting;
+use App\Services\AuditService;
+use App\Services\SetupInstructionCatalog;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\URL;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+
+class DeviceSetupController extends Controller
+{
+    public function __construct(private SetupInstructionCatalog $catalog) {}
+
+    public function index(Request $request)
+    {
+        abort_unless($request->user()->isSuperAdmin() || $request->user()->canShop('setup.manage'), 403);
+        $sessions = DeviceSetupSession::with(['device.customer'])
+            ->when(! $request->user()->isSuperAdmin(), fn ($query) => $query->where('shop_id', $request->user()->shop_id))
+            ->latest()->paginate(30);
+        $devices = Device::visibleTo($request->user())
+            ->whereDoesntHave('setupSessions', fn ($query) => $query->where('status', 'in_progress'))
+            ->with('customer')->latest()->limit(100)->get();
+
+        return view('setup.index', [
+            'sessions' => $sessions,
+            'devices' => $devices,
+            'oses' => SetupInstructionCatalog::OSES,
+            'brands' => SetupInstructionCatalog::BRANDS,
+        ]);
+    }
+
+    public function start(Request $request, Device $device, AuditService $audit)
+    {
+        $this->authorize('view', $device);
+        abort_unless($request->user()->canShop('setup.manage'), 403);
+        $data = $request->validate([
+            'computer_os' => ['required', 'in:macos,windows'],
+            'brand_group' => ['required', 'in:'.implode(',', array_keys(SetupInstructionCatalog::BRANDS)).',standard'],
+            'mode' => ['nullable', 'in:manual_guided,setup_helper'],
+            'authorized' => ['accepted'],
+        ]);
+        $data['brand_group'] = $this->catalog->normalizeBrand($data['brand_group']);
+        $data['mode'] = $data['mode'] ?? 'manual_guided';
+        $session = DeviceSetupSession::firstOrCreate(
+            ['device_id' => $device->id, 'status' => 'in_progress'],
+            ['uuid' => (string) Str::uuid(), 'shop_id' => $device->shop_id, 'started_by' => $request->user()->id, 'context' => []] + $data
+        );
+        if ($session->wasRecentlyCreated) {
+            $audit->record('SETUP_STARTED', 'Authorized structured device setup started', $request->user(), $device, [], [
+                'computer_os' => $data['computer_os'], 'brand_group' => $data['brand_group'], 'mode' => $data['mode'],
+            ]);
+        }
+
+        return redirect()->route('setup.show', $session);
+    }
+
+    public function show(Request $request, DeviceSetupSession $setup)
+    {
+        $this->tenant($request, $setup);
+        $setup->load(['device.tokens', 'device.offlinePolicy', 'device.commands', 'steps']);
+        $allSteps = $this->catalog->for($setup->computer_os, $setup->brand_group);
+        $steps = $this->visibleSteps($setup, $allSteps);
+        $currentIndex = max(0, min($steps->count() - 1, (int) $setup->current_step - 1));
+        $step = $steps[$currentIndex];
+        $progress = $setup->steps->keyBy('step_key');
+        $setup->steps()->updateOrCreate(
+            ['step_key' => $step->step_key],
+            ['device_setup_instruction_id' => $step->id, 'started_at' => $progress->get($step->step_key)?->started_at ?: now()]
+        );
+
+        return view('setup.show', [
+            'setup' => $setup->fresh()->load(['device.tokens', 'device.offlinePolicy', 'device.commands', 'steps']),
+            'steps' => $steps,
+            'step' => $step,
+            'currentIndex' => $currentIndex,
+            'progress' => $progress,
+            'serverChecks' => $this->serverChecks($setup->device),
+            'helperUrl' => URL::temporarySignedRoute('setup.helper', now()->addMinutes(15), ['setup' => $setup, 'os' => $setup->computer_os]),
+        ]);
+    }
+
+    public function step(Request $request, DeviceSetupSession $setup, AuditService $audit)
+    {
+        $this->tenant($request, $setup);
+        abort_unless($request->user()->canShop('setup.manage'), 403);
+        $steps = $this->visibleSteps($setup, $this->catalog->for($setup->computer_os, $setup->brand_group));
+        $data = $request->validate([
+            'step_key' => ['required', 'string'],
+            'direction' => ['nullable', 'in:previous,next,verify'],
+            'command_result' => ['nullable', 'string', 'max:80'],
+            'confirmations' => ['nullable', 'array'],
+            'confirmations.*' => ['string', 'max:80'],
+            'notes' => ['nullable', 'string', 'max:2000'],
+            'error_encountered' => ['nullable', 'string', 'max:2000'],
+            'troubleshooting_used' => ['nullable', 'string', 'max:2000'],
+        ]);
+        $index = $steps->search(fn ($item) => $item->step_key === $data['step_key']);
+        abort_if($index === false, 422, 'This step is not active for the selected setup.');
+        $step = $steps[$index];
+
+        if (($data['direction'] ?? 'next') === 'previous') {
+            $setup->update(['current_step' => max(1, $index)]);
+            return redirect()->route('setup.show', $setup);
+        }
+
+        $requiredConfirmations = $step->confirmation_items ?: [];
+        $given = $data['confirmations'] ?? [];
+        if (array_diff($requiredConfirmations, $given)) {
+            throw ValidationException::withMessages(['confirmations' => 'Complete every required confirmation before continuing.']);
+        }
+
+        if ($step->step_key === 'adb_check') {
+            if (! in_array($data['command_result'] ?? null, ['ADB_FOUND', 'ADB_NOT_FOUND'], true)) {
+                throw ValidationException::withMessages(['command_result' => 'Record exactly ADB_FOUND or ADB_NOT_FOUND from the detection command.']);
+            }
+            $context = $setup->context ?: [];
+            $context['adb_status'] = $data['command_result'] === 'ADB_FOUND' ? 'found' : 'missing';
+            $setup->update(['context' => $context]);
+            $steps = $this->visibleSteps($setup->fresh(), $this->catalog->for($setup->computer_os, $setup->brand_group));
+            $index = $steps->search(fn ($item) => $item->step_key === $step->step_key);
+        }
+        if ($step->command && ! $step->auto_verifiable && $step->step_key !== 'adb_check' && blank($data['command_result'] ?? null)) {
+            throw ValidationException::withMessages(['command_result' => 'Record the command/output result before continuing.']);
+        }
+        if (($data['command_result'] ?? null) === 'ERROR_RECORDED') {
+            throw ValidationException::withMessages(['command_result' => 'The different/error output has been recorded. Apply the matching solution and verify the expected output before continuing.']);
+        }
+
+        $serverPassed = $step->server_check_key ? $this->serverCheckPassed($setup->device->fresh(), $step->server_check_key) : false;
+        if ($step->auto_verifiable && ! $serverPassed && ! in_array($step->server_check_key, ['device_owner'], true)) {
+            throw ValidationException::withMessages(['verification' => 'Server verification is not confirmed yet. Refresh after the Android app reports this result.']);
+        }
+        if ($step->step_key === 'device_owner_verify' && ! $serverPassed && ($data['command_result'] ?? null) !== 'ANDROID_CONFIRMED') {
+            throw ValidationException::withMessages(['command_result' => 'Run dumpsys device_policy and record ANDROID_CONFIRMED only when Android lists the exact DeviceGuard owner component.']);
+        }
+
+        $setup->steps()->updateOrCreate(
+            ['step_key' => $step->step_key],
+            [
+                'device_setup_instruction_id' => $step->id,
+                'started_at' => $setup->steps()->where('step_key', $step->step_key)->value('started_at') ?: now(),
+                'completed' => true,
+                'completed_at' => now(),
+                'completed_by' => $request->user()->id,
+                'verification_method' => $serverPassed ? 'server_report' : (filled($data['command_result'] ?? null) ? 'command_output' : 'technician_checklist'),
+                'command_result' => $data['command_result'] ?? null,
+                'notes' => $data['notes'] ?? null,
+                'error_encountered' => $data['error_encountered'] ?? null,
+                'troubleshooting_used' => $data['troubleshooting_used'] ?? null,
+                'safe_metadata' => ['confirmations' => $given, 'server_passed_at_completion' => $serverPassed],
+            ]
+        );
+
+        $next = min($steps->count(), $index + 2);
+        $setup->update(['current_step' => $next]);
+        if ($index === $steps->count() - 1) {
+            $checks = $this->serverChecks($setup->device->fresh());
+            $required = collect($checks)->where('required', true);
+            $completedKeys = $setup->steps()->where('completed', true)->pluck('step_key');
+            $requiredStepKeys = $steps->where('required', true)->pluck('step_key');
+            if ($required->contains(fn ($check) => ! $check['ok']) || $requiredStepKeys->diff($completedKeys)->isNotEmpty()) {
+                $setup->update(['current_step' => $steps->count()]);
+                throw ValidationException::withMessages(['final' => 'Setup remains in progress. Every required step and every live server verification must be confirmed.']);
+            }
+            $setup->update(['status' => 'completed', 'completed_by' => $request->user()->id, 'completed_at' => now()]);
+            $audit->record('SETUP_COMPLETED', 'Structured device setup completed with server verification', $request->user(), $setup->device);
+        }
+
+        return redirect()->route('setup.show', $setup)->with('success', 'Step verified and progress saved.');
+    }
+
+    public function helper(Request $request, DeviceSetupSession $setup, string $os)
+    {
+        abort_unless($request->hasValidSignature(), 403);
+        $this->tenant($request, $setup);
+        abort_unless($os === $setup->computer_os, 403);
+        $url = SystemSetting::value('provisioning_apk_url');
+        $checksum = SystemSetting::value('provisioning_apk_checksum');
+        abort_unless($url && str_starts_with($url, 'https://'), 422, 'A trusted HTTPS APK URL must be configured.');
+        $script = $os === 'macos'
+            ? $this->macScript($url, $checksum)
+            : $this->windowsScript($url, $checksum, SystemSetting::value('windows_platform_tools_url'), SystemSetting::value('windows_platform_tools_checksum'));
+
+        return response($script)->header('Content-Type', 'text/plain')
+            ->header('Content-Disposition', 'attachment; filename="deviceguard-setup.'.($os === 'macos' ? 'sh' : 'ps1').'"');
+    }
+
+    private function visibleSteps(DeviceSetupSession $setup, $steps)
+    {
+        return $steps->reject(fn (DeviceSetupInstruction $step) => $step->step_key === 'adb_install' && data_get($setup->context, 'adb_status') === 'found')->values();
+    }
+
+    private function serverChecks(Device $device): array
+    {
+        $completedLock = $device->commands->first(fn ($c) => $c->type === 'LOCK_DEVICE' && $c->status === 'completed');
+        $completedUnlock = $device->commands->first(fn ($c) => $c->type === 'UNLOCK_DEVICE' && $c->status === 'completed');
+        $recentSync = $device->last_sync_at && $device->last_sync_at->gt(now()->subMinutes(15));
+        return [
+            ['key' => 'activation', 'label' => 'App activation', 'ok' => filled($device->device_uuid) && $device->tokens->isNotEmpty(), 'detail' => filled($device->device_uuid) ? 'Authenticated device identity received' : 'Waiting for Android activation', 'required' => true],
+            ['key' => 'device_owner', 'label' => 'Device Owner', 'ok' => (bool) $device->is_device_owner, 'detail' => $device->is_device_owner ? 'Android reported Device Owner=true' : 'Waiting for Android report', 'required' => true],
+            ['key' => 'admin', 'label' => 'Device Admin', 'ok' => (bool) $device->is_admin_active, 'detail' => $device->is_admin_active ? 'Admin receiver active' : 'Admin receiver not confirmed', 'required' => true],
+            ['key' => 'fcm', 'label' => 'FCM token', 'ok' => filled($device->fcm_token), 'detail' => filled($device->fcm_token) ? 'Push token received' : 'Token missing', 'required' => true],
+            ['key' => 'uninstall', 'label' => 'Uninstall protection', 'ok' => (bool) $device->can_block_uninstall, 'detail' => $device->can_block_uninstall ? 'Confirmed' : 'Needs attention', 'required' => true],
+            ['key' => 'reset', 'label' => 'Reset protection', 'ok' => (bool) $device->can_block_reset, 'detail' => $device->can_block_reset ? 'Confirmed' : 'Needs attention', 'required' => true],
+            ['key' => 'full_lock', 'label' => 'Full lock', 'ok' => (bool) $device->can_full_lock, 'detail' => $device->can_full_lock ? 'Confirmed' : 'Needs attention', 'required' => true],
+            ['key' => 'lock_task', 'label' => 'Lock task permitted', 'ok' => (bool) ($device->is_lock_task_permitted || $device->can_use_lock_task), 'detail' => ($device->is_lock_task_permitted || $device->can_use_lock_task) ? 'Confirmed' : 'Needs attention', 'required' => true],
+            ['key' => 'sync', 'label' => 'Recent sync', 'ok' => (bool) $recentSync, 'detail' => $device->last_sync_at ? $device->last_sync_at->diffForHumans() : 'Never synced', 'required' => true],
+            ['key' => 'offline', 'label' => 'Offline policy', 'ok' => (bool) $device->offlinePolicy?->policy_acknowledged_at, 'detail' => $device->offlinePolicy?->policy_acknowledged_at ? 'Acknowledged '.$device->offlinePolicy->policy_acknowledged_at->diffForHumans() : 'Acknowledgement pending', 'required' => true],
+            ['key' => 'lock', 'label' => 'Lock test', 'ok' => (bool) $completedLock, 'detail' => $completedLock ? 'Completed command #'.$completedLock->id : 'No completed lock command', 'required' => true],
+            ['key' => 'unlock', 'label' => 'Unlock test', 'ok' => (bool) $completedUnlock, 'detail' => $completedUnlock ? 'Completed command #'.$completedUnlock->id : 'No completed unlock command', 'required' => true],
+        ];
+    }
+
+    private function serverCheckPassed(Device $device, string $key): bool
+    {
+        $checks = collect($this->serverChecks($device->loadMissing(['tokens', 'commands', 'offlinePolicy'])));
+        return match ($key) {
+            'capabilities' => $checks->whereIn('key', ['activation', 'device_owner', 'admin', 'fcm', 'uninstall', 'reset', 'full_lock', 'lock_task', 'sync', 'offline'])->every(fn ($check) => $check['ok']),
+            'final' => $checks->where('required', true)->every(fn ($check) => $check['ok']),
+            'lock_unlock' => $checks->whereIn('key', ['lock', 'unlock'])->every(fn ($check) => $check['ok']),
+            default => (bool) data_get($checks->firstWhere('key', $key), 'ok'),
+        };
+    }
+
+    private function tenant(Request $request, DeviceSetupSession $session): void
+    {
+        abort_unless($request->user()->isSuperAdmin() || $session->shop_id === $request->user()->shop_id, 403);
+    }
+
+    private function macScript(string $url, ?string $checksum): string
+    {
+        return "#!/bin/sh\nset -eu\nprintf 'AUTHORIZED setup only. Type YES to continue: '; read ok; [ \"\$ok\" = YES ] || exit 1\nif command -v adb >/dev/null 2>&1; then echo ADB_FOUND; else echo ADB_NOT_FOUND; command -v brew >/dev/null || { echo 'Install official Platform Tools first.'; exit 2; }; brew install android-platform-tools; fi\nadb version\nadb kill-server; adb start-server; adb devices\nadb shell pm list users\nadb shell dumpsys account | grep 'Account {' || echo NO_ACCOUNTS\ncurl -fL ".escapeshellarg($url)." -o deviceguard.apk\n".($checksum ? "echo ".escapeshellarg($checksum)."  deviceguard.apk | shasum -a 256 -c -\n" : '')."adb install -r -t deviceguard.apk\nadb shell pm path com.twinsofte.deviceguard\nadb shell dumpsys package com.twinsofte.deviceguard | grep DevicePolicyReceiver\nprintf 'Checks clean and Device Owner authorized? Type SET-OWNER: '; read own; [ \"\$own\" = SET-OWNER ] || exit 0\nadb shell dpm set-device-owner com.twinsofte.deviceguard/.devicepolicy.DevicePolicyReceiver\nadb shell dumpsys device_policy\nadb shell monkey -p com.twinsofte.deviceguard -c android.intent.category.LAUNCHER 1\nprintf 'HELPER_RESULT: commands finished. Android and server verification are still required in the wizard.\\n'\n";
+    }
+
+    private function windowsScript(string $url, ?string $checksum, ?string $toolsUrl, ?string $toolsChecksum): string
+    {
+        $url = str_replace("'", "''", $url);
+        $toolsUrl = str_replace("'", "''", (string) $toolsUrl);
+        return "\$ErrorActionPreference='Stop'\nif ((Read-Host 'AUTHORIZED setup only. Type YES to continue') -ne 'YES') { exit 1 }\nif ((Get-Command adb -ErrorAction SilentlyContinue) -or (Test-Path 'C:\\platform-tools\\adb.exe')) { Write-Host ADB_FOUND } else { Write-Host ADB_NOT_FOUND\n".($toolsUrl && $toolsChecksum ? "Invoke-WebRequest -Uri '$toolsUrl' -OutFile platform-tools.zip\nif ((Get-FileHash platform-tools.zip -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($toolsChecksum)."') { throw 'Platform Tools checksum mismatch' }\nExpand-Archive platform-tools.zip C:\\ -Force\n" : "throw 'Configure the official Platform Tools URL and SHA-256 in Super Admin settings.'\n")."}\nSet-Location C:\\platform-tools\n.\\adb.exe version\n.\\adb.exe kill-server; .\\adb.exe start-server; .\\adb.exe devices\n.\\adb.exe shell pm list users\n.\\adb.exe shell dumpsys account | Select-String 'Account \\{'\nInvoke-WebRequest -Uri '$url' -OutFile deviceguard.apk\n".($checksum ? "if ((Get-FileHash deviceguard.apk -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($checksum)."') { throw 'APK checksum mismatch' }\n" : '').".\\adb.exe install -r -t deviceguard.apk\n.\\adb.exe shell pm path com.twinsofte.deviceguard\n.\\adb.exe shell dumpsys package com.twinsofte.deviceguard | Select-String DevicePolicyReceiver\nif ((Read-Host 'Checks clean and Device Owner authorized? Type SET-OWNER') -eq 'SET-OWNER') { .\\adb.exe shell dpm set-device-owner com.twinsofte.deviceguard/.devicepolicy.DevicePolicyReceiver; .\\adb.exe shell dumpsys device_policy; .\\adb.exe shell monkey -p com.twinsofte.deviceguard -c android.intent.category.LAUNCHER 1 }\nWrite-Host 'HELPER_RESULT: commands finished. Android and server verification are still required in the wizard.'\n";
+    }
 }
