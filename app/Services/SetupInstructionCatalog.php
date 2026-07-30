@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\DB;
 class SetupInstructionCatalog
 {
     public const OSES = ['windows' => 'Windows', 'macos' => 'macOS'];
+
     public const BRANDS = [
         'samsung' => 'Samsung',
         'xiaomi' => 'Xiaomi / Redmi / POCO',
@@ -21,12 +22,15 @@ class SetupInstructionCatalog
         'other' => 'Other Android',
     ];
 
+    public function __construct(private DeviceGuardApkSettings $apk) {}
+
     public function for(string $os, string $brand): Collection
     {
         $brand = $this->normalizeBrand($brand);
         if (! DeviceSetupInstruction::where('computer_os', $os)->where('phone_brand', $brand)->exists()) {
             $this->syncDefaults($os, $brand);
         }
+        $this->refreshApkInstallInstruction($os, $brand);
 
         return DeviceSetupInstruction::where('computer_os', $os)
             ->where('phone_brand', $brand)->where('active', true)
@@ -62,14 +66,44 @@ class SetupInstructionCatalog
         };
     }
 
+    private function refreshApkInstallInstruction(string $os, string $brand): void
+    {
+        $current = DeviceSetupInstruction::where('computer_os', $os)
+            ->where('phone_brand', $brand)
+            ->where('step_key', 'apk_install')
+            ->first();
+        $default = collect($this->defaults($os, $brand))->firstWhere('step_key', 'apk_install');
+
+        if (! $current || ! $default) {
+            return;
+        }
+
+        $fields = [
+            'short_description',
+            'why_required',
+            'action_location',
+            'numbered_instructions',
+            'shell_type',
+            'command',
+            'run_from',
+            'expected_output',
+            'verification_items',
+        ];
+        $updates = collect($default)->only($fields)->all();
+
+        if (collect($fields)->contains(fn (string $field) => $current->{$field} !== $updates[$field])) {
+            $current->update($updates);
+        }
+    }
+
     private function defaults(string $os, string $brand): array
     {
         $isWin = $os === 'windows';
         $adb = $isWin ? '.\adb.exe' : 'adb';
         $shell = $isWin ? 'PowerShell' : 'Terminal (zsh)';
         $folder = $isWin ? 'C:\platform-tools' : 'Any folder after Android Platform Tools is on PATH';
-        $apkUrl = SystemSetting::value('provisioning_apk_url') ?: 'CONFIGURE_APK_URL_IN_SUPER_ADMIN';
-        $apkChecksum = SystemSetting::value('provisioning_apk_checksum') ?: 'CONFIGURE_SHA256_IN_SUPER_ADMIN';
+        $apkUrl = $this->apk->url();
+        $apkChecksum = $this->apk->checksum();
         $toolsUrl = SystemSetting::value('windows_platform_tools_url') ?: 'https://developer.android.com/tools/releases/platform-tools';
         $brandName = self::BRANDS[$brand];
         $brandGuide = $this->brandGuide($brand);
@@ -105,7 +139,7 @@ class SetupInstructionCatalog
                 'The command prints exactly ADB_FOUND or ADB_NOT_FOUND.',
                 $commonAdbErrors,
                 ['Detection result recorded', 'ADB installation is not repeated when already available'],
-                [], $shell, $isWin ? "if (Get-Command adb -ErrorAction SilentlyContinue) { 'ADB_FOUND' } elseif (Test-Path 'C:\\platform-tools\\adb.exe') { 'ADB_FOUND' } else { 'ADB_NOT_FOUND' }" : "if command -v adb >/dev/null 2>&1; then echo ADB_FOUND; else echo ADB_NOT_FOUND; fi", $isWin ? 'Any PowerShell folder' : 'Any Terminal folder', false, 'adb_detection'),
+                [], $shell, $isWin ? "if (Get-Command adb -ErrorAction SilentlyContinue) { 'ADB_FOUND' } elseif (Test-Path 'C:\\platform-tools\\adb.exe') { 'ADB_FOUND' } else { 'ADB_NOT_FOUND' }" : 'if command -v adb >/dev/null 2>&1; then echo ADB_FOUND; else echo ADB_NOT_FOUND; fi', $isWin ? 'Any PowerShell folder' : 'Any Terminal folder', false, 'adb_detection'),
 
             $this->step('adb_install', 'Install official Android Platform Tools only when ADB is missing',
                 'Using Google’s official tools avoids modified ADB binaries and provides the commands required by the remaining steps.',
@@ -185,13 +219,29 @@ class SetupInstructionCatalog
                 [], $shell, $isWin ? "{$adb} shell dumpsys account | Select-String 'Account \\{'" : "{$adb} shell dumpsys account | grep 'Account {' || echo NO_ACCOUNTS", $folder),
 
             $this->step('apk_install', 'Download, verify, and install the configured DeviceGuard APK',
-                'Only the Super Admin-approved HTTPS APK and checksum should be installed.',
+                $apkChecksum
+                    ? 'Only the Super Admin-approved HTTPS APK should be installed. Verify its configured SHA-256 before installation.'
+                    : 'Only the Super Admin-approved HTTPS APK should be installed. APK checksum verification is not configured by Super Admin, so installation may continue with the visible warning.',
                 $shell,
-                ['Confirm the configured APK URL and SHA-256 with the Super Admin.', 'Download to the Platform Tools folder (or download directly on the phone only from the same approved URL).', 'Verify SHA-256 before installation.', 'Run the install command and approve any phone-side installation prompt.'],
-                'Checksum matches and ADB prints Success.',
+                array_values(array_filter([
+                    "Use only the centrally configured APK URL: {$apkUrl}",
+                    $isWin ? 'Open PowerShell in C:\platform-tools.' : 'Open Terminal and change to ~/Downloads.',
+                    'Download deviceguard.apk and verify that the file exists and has a size greater than zero.',
+                    $apkChecksum
+                        ? 'Calculate SHA-256 and compare it with the saved expected checksum before installation.'
+                        : 'APK checksum verification is not configured by Super Admin. Continue only with the approved HTTPS URL.',
+                    'Install with ADB, confirm Success, then verify the exact DeviceGuard package path.',
+                ])),
+                "The download exists, ADB prints:\nPerforming Streamed Install\nSuccess\n\nPackage verification returns:\npackage:/data/app/.../com.twinsofte.deviceguard.../base.apk",
                 [$this->error('INSTALL_FAILED_USER_RESTRICTED', 'The phone denied USB installation or a brand security control requires approval.', $brandGuide['install_help']), $this->error('INSTALL_FAILED_UPDATE_INCOMPATIBLE / signature mismatch', 'A differently signed DeviceGuard build is already installed.', 'Stop. Confirm the package is legitimate, preserve required data, then uninstall only with authorization or use the matching signed APK.'), $this->error('Checksum mismatch', 'The APK does not match the configured release.', 'Delete it, download again from the configured HTTPS URL, and stop if the checksum still differs.')],
-                ['Approved HTTPS URL used', 'SHA-256 matches', 'ADB installation reports Success'],
-                [], $shell, $isWin ? "Invoke-WebRequest -Uri '{$apkUrl}' -OutFile deviceguard.apk\n(Get-FileHash .\\deviceguard.apk -Algorithm SHA256).Hash\n# Expected SHA-256: {$apkChecksum}\n{$adb} install -r -t .\\deviceguard.apk" : "curl -fL '{$apkUrl}' -o deviceguard.apk\nshasum -a 256 deviceguard.apk\n# Expected SHA-256: {$apkChecksum}\n{$adb} install -r -t deviceguard.apk", $folder),
+                array_values(array_filter([
+                    'Approved HTTPS URL used',
+                    'Downloaded deviceguard.apk exists and is not empty',
+                    $apkChecksum ? 'SHA-256 matches the saved expected checksum' : null,
+                    'ADB installation reports Success',
+                    'Exact DeviceGuard package path returned',
+                ])),
+                [], $shell, $this->apkInstallCommand($isWin, $apkUrl, $apkChecksum), $isWin ? 'C:\platform-tools' : '~/Downloads'),
 
             $this->step('package_receiver', 'Verify the DeviceGuard package and Device Admin receiver',
                 'Device Owner can only be assigned when the exact production package and receiver are installed.',
@@ -200,7 +250,7 @@ class SetupInstructionCatalog
                 'The package path and DevicePolicyReceiver component are both present.',
                 [$this->error('Package path is empty', 'The APK is not installed for the primary user.', 'Return to APK installation, resolve its reported error, and verify again.'), $this->error('Receiver not found', 'The APK build lacks the required receiver or the component name differs.', 'Stop and obtain the approved DeviceGuard build. Do not guess a component name.')],
                 ['Package path returned', 'Exact receiver component returned'],
-                [], $shell, "{$adb} shell pm path com.twinsofte.deviceguard\n{$adb} shell dumpsys package com.twinsofte.deviceguard | ".($isWin ? "Select-String 'DevicePolicyReceiver'" : "grep DevicePolicyReceiver"), $folder),
+                [], $shell, "{$adb} shell pm path com.twinsofte.deviceguard\n{$adb} shell dumpsys package com.twinsofte.deviceguard | ".($isWin ? "Select-String 'DevicePolicyReceiver'" : 'grep DevicePolicyReceiver'), $folder),
 
             $this->step('device_owner', 'Assign DeviceGuard as Android Device Owner',
                 'Device Owner is required for uninstall protection, reset protection, full lock, lock task, and offline enforcement.',
@@ -303,6 +353,37 @@ class SetupInstructionCatalog
             'auto_verifiable' => $auto,
             'server_check_key' => $serverKey,
         ];
+    }
+
+    private function apkInstallCommand(bool $windows, string $url, ?string $checksum): string
+    {
+        if ($windows) {
+            $checksumCommand = $checksum
+                ? "\n(Get-FileHash .\\deviceguard.apk -Algorithm SHA256).Hash\n# Compare with saved expected SHA-256: {$checksum}\n"
+                : "\n# APK checksum verification is not configured by Super Admin.\n";
+
+            return "Invoke-WebRequest `\n".
+                "-Uri \"{$url}\" `\n".
+                "-OutFile \".\\deviceguard.apk\"\n\n".
+                "Get-Item .\\deviceguard.apk |\n".
+                "Select-Object Name, Length, LastWriteTime\n".
+                $checksumCommand."\n".
+                ".\\adb.exe install -r -t .\\deviceguard.apk\n\n".
+                ".\\adb.exe shell pm path {$this->apk->packageName()}";
+        }
+
+        $checksumCommand = $checksum
+            ? "\nshasum -a 256 deviceguard.apk\n# Compare with saved expected SHA-256: {$checksum}\n"
+            : "\n# APK checksum verification is not configured by Super Admin.\n";
+
+        return "cd ~/Downloads\n\n".
+            "curl -L \\\n".
+            "\"{$url}\" \\\n".
+            "-o deviceguard.apk\n\n".
+            "ls -lh deviceguard.apk\n".
+            $checksumCommand."\n".
+            "adb install -r -t deviceguard.apk\n\n".
+            "adb shell pm path {$this->apk->packageName()}";
     }
 
     private function error(string $output, string $meaning, string $solution): array

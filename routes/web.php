@@ -55,6 +55,8 @@ Route::middleware('auth')->group(function () {
     Route::get('/settings/qr-provisioning', [QrProvisioningSettingsController::class, 'edit'])->name('settings.qr-provisioning');
     Route::put('/settings/qr-provisioning', [QrProvisioningSettingsController::class, 'update'])->name('settings.qr-provisioning.update');
     Route::post('/settings/qr-provisioning/validate', [QrProvisioningSettingsController::class, 'validateConfiguration'])->name('settings.qr-provisioning.validate');
+    Route::post('/settings/qr-provisioning/test-apk', [QrProvisioningSettingsController::class, 'testApkUrl'])->name('settings.qr-provisioning.test-apk');
+    Route::post('/settings/qr-provisioning/checksum', [QrProvisioningSettingsController::class, 'calculateOrVerifyChecksum'])->name('settings.qr-provisioning.checksum');
     Route::get('/settings/offline-protection', [OfflineProtectionSettingsController::class, 'edit'])->name('settings.offline-protection');
     Route::put('/settings/offline-protection', [OfflineProtectionSettingsController::class, 'update'])->name('settings.offline-protection.update');
     Route::get('/reports/offline-protection', OfflineProtectionReportController::class)->name('reports.offline-protection');

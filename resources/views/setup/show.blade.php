@@ -3,6 +3,9 @@
     $completed = $setup->steps->where('completed', true)->keyBy('step_key');
     $percent = round($completed->count() / max(1, $steps->count()) * 100);
     $brandLabel = \App\Services\SetupInstructionCatalog::BRANDS[$setup->brand_group] ?? ucfirst($setup->brand_group);
+    $savedStep = $setup->steps->firstWhere('step_key', $step->step_key);
+    $resultValue = old('command_result', $savedStep?->command_result ?: \App\Http\Controllers\DeviceSetupController::EXPECTED_OUTPUT_CONFIRMED);
+    $differentOutput = in_array($resultValue, [\App\Http\Controllers\DeviceSetupController::DIFFERENT_ERROR_OUTPUT, 'ERROR_RECORDED'], true);
 @endphp
 <div class="mx-auto max-w-[1500px]">
     <header class="mb-6">
@@ -98,7 +101,7 @@
                                 <legend class="px-2 font-black text-amber-950">Required confirmations</legend>
                                 <div class="space-y-3">
                                     @foreach($step->confirmation_items as $confirmation)
-                                        <label class="flex gap-3 text-sm font-medium text-amber-950"><input class="step-check mt-1" type="checkbox" name="confirmations[]" value="{{ $confirmation }}" required><span>{{ str($confirmation)->replace('_',' ')->title() }} confirmed</span></label>
+                                        <label class="flex gap-3 text-sm font-medium text-amber-950"><input class="step-check mt-1" type="checkbox" name="confirmations[]" value="{{ $confirmation }}" @checked(in_array($confirmation, old('confirmations', []), true)) required><span>{{ str($confirmation)->replace('_',' ')->title() }} confirmed</span></label>
                                     @endforeach
                                 </div>
                             </fieldset>
@@ -108,24 +111,32 @@
                             <legend class="px-2 font-black">Verification checklist</legend>
                             <div class="space-y-3">
                                 @foreach($step->verification_items as $item)
-                                    <label class="flex gap-3 text-sm text-slate-700"><input class="step-check mt-1" type="checkbox" required><span>{{ $item }}</span></label>
+                                    <label class="flex gap-3 text-sm text-slate-700"><input class="step-check mt-1" type="checkbox" name="verification_items[]" value="{{ $loop->index }}" @checked(in_array($loop->index, array_map('intval', old('verification_items', [])), true)) required><span>{{ $item }}</span></label>
                                 @endforeach
                             </div>
                         </fieldset>
 
                         @if($step->step_key === 'adb_check')
-                            <fieldset><legend class="field-label">Recorded command result <x-required/></legend><div class="mt-2 flex flex-wrap gap-3">@foreach(['ADB_FOUND','ADB_NOT_FOUND'] as $result)<label class="rounded-xl border border-slate-200 px-4 py-3 font-mono text-sm has-[:checked]:border-indigo-600 has-[:checked]:bg-indigo-50"><input type="radio" name="command_result" value="{{ $result }}" required class="mr-2">{{ $result }}</label>@endforeach</div></fieldset>
-                        @elseif($step->step_key === 'device_owner_verify')
-                            <label class="field-label">Android dumpsys result <x-required/><select class="field-input" name="command_result" required><option value="">Choose only after reading Android output</option><option value="ANDROID_CONFIRMED">ANDROID_CONFIRMED — exact DeviceGuard owner shown</option><option value="ERROR_RECORDED">Different/error output — keep step open</option></select></label>
-                        @elseif($step->command && !$step->auto_verifiable)
-                            <label class="field-label">Command/output result <x-required/><select class="field-input" name="command_result" required><option value="">Record the result</option><option value="EXPECTED_OUTPUT_CONFIRMED">Expected output confirmed</option><option value="ERROR_RECORDED">Different/error output — keep step open</option></select></label>
+                            <fieldset><legend class="field-label">ADB detection result <x-required/></legend><div class="mt-2 flex flex-wrap gap-3">@foreach(['ADB_FOUND','ADB_NOT_FOUND'] as $result)<label class="rounded-xl border border-slate-200 px-4 py-3 font-mono text-sm has-[:checked]:border-indigo-600 has-[:checked]:bg-indigo-50"><input type="radio" name="adb_detection_result" value="{{ $result }}" @checked(old('adb_detection_result') === $result) required class="mr-2">{{ $result }}</label>@endforeach</div></fieldset>
                         @endif
-
-                        <div class="grid gap-4 md:grid-cols-2">
-                            <label class="field-label">Error encountered (optional)<textarea class="field-input mt-1" name="error_encountered" rows="3" placeholder="Paste only non-sensitive error text"></textarea></label>
-                            <label class="field-label">Troubleshooting used (optional)<textarea class="field-input mt-1" name="troubleshooting_used" rows="3" placeholder="What was changed before verification succeeded?"></textarea></label>
-                        </div>
-                        <label class="field-label">Technician notes (optional)<textarea class="field-input mt-1" name="notes" rows="3" placeholder="Non-sensitive work-order notes"></textarea></label>
+                        <input id="command-result" type="hidden" name="command_result" value="{{ $differentOutput ? \App\Http\Controllers\DeviceSetupController::DIFFERENT_ERROR_OUTPUT : \App\Http\Controllers\DeviceSetupController::EXPECTED_OUTPUT_CONFIRMED }}">
+                        <section id="expected-result-card" class="{{ $differentOutput ? 'hidden ' : '' }}rounded-2xl border border-emerald-300 bg-emerald-50 p-5" aria-live="polite">
+                                <div class="flex flex-wrap items-center justify-between gap-4">
+                                    <div class="flex items-center gap-3"><span class="grid size-10 place-items-center rounded-full bg-emerald-600 text-xl font-black text-white" aria-hidden="true">✓</span><div><p class="text-xs font-black uppercase tracking-wider text-emerald-700">Command/output result</p><p class="mt-1 font-black text-emerald-950">Expected output confirmed</p></div></div>
+                                    <button id="different-output-button" type="button" class="secondary-button border-emerald-300 bg-white text-emerald-900">My output is different</button>
+                                </div>
+                                @if($step->server_check_key)<p class="mt-3 text-xs font-semibold text-emerald-800">This selection does not replace the required live Android/server verification.</p>@endif
+                        </section>
+                        <section id="different-result-card" class="{{ $differentOutput ? '' : 'hidden ' }}rounded-2xl border border-rose-300 bg-rose-50 p-5" aria-live="polite">
+                                <div class="flex items-center gap-3"><span class="grid size-10 place-items-center rounded-full bg-rose-600 text-xl font-black text-white" aria-hidden="true">!</span><div><p class="text-xs font-black uppercase tracking-wider text-rose-700">Command/output result</p><p class="mt-1 font-black text-rose-950">Different/error output</p></div></div>
+                                <p class="mt-3 text-sm text-rose-800">Paste only non-sensitive error text. This step will remain open while you troubleshoot.</p>
+                                <div class="mt-4 grid gap-4 md:grid-cols-2">
+                                    <label class="field-label text-rose-950">Error output <x-required/><textarea id="error-output" class="field-input mt-1" name="error_encountered" rows="4" maxlength="2000" placeholder="Paste only non-sensitive error text" @required($differentOutput)>{{ old('error_encountered', $savedStep?->error_encountered) }}</textarea></label>
+                                    <label class="field-label text-rose-950">Troubleshooting used<textarea class="field-input mt-1" name="troubleshooting_used" rows="4" maxlength="2000" placeholder="What did you change?">{{ old('troubleshooting_used', $savedStep?->troubleshooting_used) }}</textarea></label>
+                                </div>
+                                <label class="field-label mt-4 text-rose-950">Technician notes<textarea class="field-input mt-1" name="notes" rows="3" maxlength="2000" placeholder="Non-sensitive work-order notes">{{ old('notes', $savedStep?->notes) }}</textarea></label>
+                                <button id="output-fixed-button" type="button" class="secondary-button mt-4 border-rose-300 bg-white text-rose-900">Output fixed — confirm expected result</button>
+                        </section>
 
                         <div class="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-6">
                             @if($currentIndex > 0)
@@ -189,4 +200,28 @@
         </aside>
     </div>
 </div>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const result = document.getElementById('command-result');
+    const expectedCard = document.getElementById('expected-result-card');
+    const differentCard = document.getElementById('different-result-card');
+    const errorOutput = document.getElementById('error-output');
+    if (!result || !expectedCard || !differentCard || !errorOutput) return;
+
+    document.getElementById('different-output-button')?.addEventListener('click', () => {
+        result.value = @json(\App\Http\Controllers\DeviceSetupController::DIFFERENT_ERROR_OUTPUT);
+        expectedCard.classList.add('hidden');
+        differentCard.classList.remove('hidden');
+        errorOutput.required = true;
+        errorOutput.focus();
+    });
+    document.getElementById('output-fixed-button')?.addEventListener('click', () => {
+        result.value = @json(\App\Http\Controllers\DeviceSetupController::EXPECTED_OUTPUT_CONFIRMED);
+        differentCard.classList.add('hidden');
+        expectedCard.classList.remove('hidden');
+        errorOutput.required = false;
+        document.getElementById('different-output-button')?.focus();
+    });
+});
+</script>
 </x-layouts.app>

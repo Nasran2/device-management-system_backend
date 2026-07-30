@@ -7,6 +7,7 @@ use App\Models\DeviceSetupInstruction;
 use App\Models\DeviceSetupSession;
 use App\Models\SystemSetting;
 use App\Services\AuditService;
+use App\Services\DeviceGuardApkSettings;
 use App\Services\SetupInstructionCatalog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\URL;
@@ -15,7 +16,14 @@ use Illuminate\Validation\ValidationException;
 
 class DeviceSetupController extends Controller
 {
-    public function __construct(private SetupInstructionCatalog $catalog) {}
+    public const EXPECTED_OUTPUT_CONFIRMED = 'expected_output_confirmed';
+
+    public const DIFFERENT_ERROR_OUTPUT = 'different_error_output';
+
+    public function __construct(
+        private SetupInstructionCatalog $catalog,
+        private DeviceGuardApkSettings $apk,
+    ) {}
 
     public function index(Request $request)
     {
@@ -69,10 +77,20 @@ class DeviceSetupController extends Controller
         $currentIndex = max(0, min($steps->count() - 1, (int) $setup->current_step - 1));
         $step = $steps[$currentIndex];
         $progress = $setup->steps->keyBy('step_key');
-        $setup->steps()->updateOrCreate(
+        $setupStep = $setup->steps()->firstOrCreate(
             ['step_key' => $step->step_key],
-            ['device_setup_instruction_id' => $step->id, 'started_at' => $progress->get($step->step_key)?->started_at ?: now()]
+            [
+                'device_setup_instruction_id' => $step->id,
+                'started_at' => now(),
+                'command_result' => self::EXPECTED_OUTPUT_CONFIRMED,
+            ]
         );
+        if (! $setupStep->device_setup_instruction_id || ! $setupStep->started_at) {
+            $setupStep->update([
+                'device_setup_instruction_id' => $step->id,
+                'started_at' => $setupStep->started_at ?: now(),
+            ]);
+        }
 
         return view('setup.show', [
             'setup' => $setup->fresh()->load(['device.tokens', 'device.offlinePolicy', 'device.commands', 'steps']),
@@ -94,10 +112,13 @@ class DeviceSetupController extends Controller
             'step_key' => ['required', 'string'],
             'direction' => ['nullable', 'in:previous,next,verify'],
             'command_result' => ['nullable', 'string', 'max:80'],
+            'adb_detection_result' => ['nullable', 'in:ADB_FOUND,ADB_NOT_FOUND'],
             'confirmations' => ['nullable', 'array'],
             'confirmations.*' => ['string', 'max:80'],
+            'verification_items' => ['nullable', 'array'],
+            'verification_items.*' => ['integer', 'min:0'],
             'notes' => ['nullable', 'string', 'max:2000'],
-            'error_encountered' => ['nullable', 'string', 'max:2000'],
+            'error_encountered' => ['nullable', 'string', 'max:2000', 'required_if:command_result,'.self::DIFFERENT_ERROR_OUTPUT.',ERROR_RECORDED'],
             'troubleshooting_used' => ['nullable', 'string', 'max:2000'],
         ]);
         $index = $steps->search(fn ($item) => $item->step_key === $data['step_key']);
@@ -106,6 +127,7 @@ class DeviceSetupController extends Controller
 
         if (($data['direction'] ?? 'next') === 'previous') {
             $setup->update(['current_step' => max(1, $index)]);
+
             return redirect()->route('setup.show', $setup);
         }
 
@@ -114,30 +136,43 @@ class DeviceSetupController extends Controller
         if (array_diff($requiredConfirmations, $given)) {
             throw ValidationException::withMessages(['confirmations' => 'Complete every required confirmation before continuing.']);
         }
+        $requiredChecklist = array_keys($step->verification_items ?: []);
+        $givenChecklist = array_values(array_unique(array_map('intval', $data['verification_items'] ?? [])));
+        if (array_diff($requiredChecklist, $givenChecklist)) {
+            throw ValidationException::withMessages(['verification_items' => 'Complete every verification checklist item before continuing.']);
+        }
 
+        $commandResult = $data['command_result'] ?? self::EXPECTED_OUTPUT_CONFIRMED;
         if ($step->step_key === 'adb_check') {
-            if (! in_array($data['command_result'] ?? null, ['ADB_FOUND', 'ADB_NOT_FOUND'], true)) {
-                throw ValidationException::withMessages(['command_result' => 'Record exactly ADB_FOUND or ADB_NOT_FOUND from the detection command.']);
+            $adbDetectionResult = $data['adb_detection_result'] ?? null;
+            if (! in_array($adbDetectionResult, ['ADB_FOUND', 'ADB_NOT_FOUND'], true)) {
+                throw ValidationException::withMessages(['adb_detection_result' => 'Record exactly ADB_FOUND or ADB_NOT_FOUND from the detection command.']);
             }
             $context = $setup->context ?: [];
-            $context['adb_status'] = $data['command_result'] === 'ADB_FOUND' ? 'found' : 'missing';
+            $context['adb_status'] = $adbDetectionResult === 'ADB_FOUND' ? 'found' : 'missing';
             $setup->update(['context' => $context]);
             $steps = $this->visibleSteps($setup->fresh(), $this->catalog->for($setup->computer_os, $setup->brand_group));
             $index = $steps->search(fn ($item) => $item->step_key === $step->step_key);
         }
-        if ($step->command && ! $step->auto_verifiable && $step->step_key !== 'adb_check' && blank($data['command_result'] ?? null)) {
-            throw ValidationException::withMessages(['command_result' => 'Record the command/output result before continuing.']);
+        if (! in_array($commandResult, [
+            self::EXPECTED_OUTPUT_CONFIRMED,
+            self::DIFFERENT_ERROR_OUTPUT,
+            'EXPECTED_OUTPUT_CONFIRMED',
+            'ERROR_RECORDED',
+        ], true)) {
+            throw ValidationException::withMessages(['command_result' => 'The command/output result is invalid.']);
         }
-        if (($data['command_result'] ?? null) === 'ERROR_RECORDED') {
-            throw ValidationException::withMessages(['command_result' => 'The different/error output has been recorded. Apply the matching solution and verify the expected output before continuing.']);
+        if (in_array($commandResult, [self::DIFFERENT_ERROR_OUTPUT, 'ERROR_RECORDED'], true)) {
+            $this->recordDifferentOutput($setup, $step, $given, $givenChecklist, $data);
+            throw ValidationException::withMessages(['command_result' => 'The different/error output has been recorded. Apply the matching solution, then choose “Output fixed — confirm expected result”.']);
+        }
+        if ($commandResult === 'EXPECTED_OUTPUT_CONFIRMED') {
+            $commandResult = self::EXPECTED_OUTPUT_CONFIRMED;
         }
 
         $serverPassed = $step->server_check_key ? $this->serverCheckPassed($setup->device->fresh(), $step->server_check_key) : false;
-        if ($step->auto_verifiable && ! $serverPassed && ! in_array($step->server_check_key, ['device_owner'], true)) {
+        if ($step->auto_verifiable && $step->server_check_key && ! $serverPassed) {
             throw ValidationException::withMessages(['verification' => 'Server verification is not confirmed yet. Refresh after the Android app reports this result.']);
-        }
-        if ($step->step_key === 'device_owner_verify' && ! $serverPassed && ($data['command_result'] ?? null) !== 'ANDROID_CONFIRMED') {
-            throw ValidationException::withMessages(['command_result' => 'Run dumpsys device_policy and record ANDROID_CONFIRMED only when Android lists the exact DeviceGuard owner component.']);
         }
 
         $setup->steps()->updateOrCreate(
@@ -148,12 +183,17 @@ class DeviceSetupController extends Controller
                 'completed' => true,
                 'completed_at' => now(),
                 'completed_by' => $request->user()->id,
-                'verification_method' => $serverPassed ? 'server_report' : (filled($data['command_result'] ?? null) ? 'command_output' : 'technician_checklist'),
-                'command_result' => $data['command_result'] ?? null,
+                'verification_method' => $serverPassed ? 'server_report' : ($step->command ? 'command_output' : 'technician_checklist'),
+                'command_result' => $commandResult,
                 'notes' => $data['notes'] ?? null,
                 'error_encountered' => $data['error_encountered'] ?? null,
                 'troubleshooting_used' => $data['troubleshooting_used'] ?? null,
-                'safe_metadata' => ['confirmations' => $given, 'server_passed_at_completion' => $serverPassed],
+                'safe_metadata' => [
+                    'confirmations' => $given,
+                    'verification_items' => $givenChecklist,
+                    'adb_detection_result' => $data['adb_detection_result'] ?? null,
+                    'server_passed_at_completion' => $serverPassed,
+                ],
             ]
         );
 
@@ -180,9 +220,8 @@ class DeviceSetupController extends Controller
         abort_unless($request->hasValidSignature(), 403);
         $this->tenant($request, $setup);
         abort_unless($os === $setup->computer_os, 403);
-        $url = SystemSetting::value('provisioning_apk_url');
-        $checksum = SystemSetting::value('provisioning_apk_checksum');
-        abort_unless($url && str_starts_with($url, 'https://'), 422, 'A trusted HTTPS APK URL must be configured.');
+        $url = $this->apk->url();
+        $checksum = $this->apk->checksum();
         $script = $os === 'macos'
             ? $this->macScript($url, $checksum)
             : $this->windowsScript($url, $checksum, SystemSetting::value('windows_platform_tools_url'), SystemSetting::value('windows_platform_tools_checksum'));
@@ -196,11 +235,42 @@ class DeviceSetupController extends Controller
         return $steps->reject(fn (DeviceSetupInstruction $step) => $step->step_key === 'adb_install' && data_get($setup->context, 'adb_status') === 'found')->values();
     }
 
+    private function recordDifferentOutput(
+        DeviceSetupSession $setup,
+        DeviceSetupInstruction $step,
+        array $confirmations,
+        array $verificationItems,
+        array $data,
+    ): void {
+        $setup->steps()->updateOrCreate(
+            ['step_key' => $step->step_key],
+            [
+                'device_setup_instruction_id' => $step->id,
+                'started_at' => $setup->steps()->where('step_key', $step->step_key)->value('started_at') ?: now(),
+                'completed' => false,
+                'completed_at' => null,
+                'completed_by' => null,
+                'verification_method' => 'command_output',
+                'command_result' => self::DIFFERENT_ERROR_OUTPUT,
+                'notes' => $data['notes'] ?? null,
+                'error_encountered' => $data['error_encountered'],
+                'troubleshooting_used' => $data['troubleshooting_used'] ?? null,
+                'safe_metadata' => [
+                    'confirmations' => $confirmations,
+                    'verification_items' => $verificationItems,
+                    'adb_detection_result' => $data['adb_detection_result'] ?? null,
+                    'server_passed_at_completion' => false,
+                ],
+            ]
+        );
+    }
+
     private function serverChecks(Device $device): array
     {
         $completedLock = $device->commands->first(fn ($c) => $c->type === 'LOCK_DEVICE' && $c->status === 'completed');
         $completedUnlock = $device->commands->first(fn ($c) => $c->type === 'UNLOCK_DEVICE' && $c->status === 'completed');
         $recentSync = $device->last_sync_at && $device->last_sync_at->gt(now()->subMinutes(15));
+
         return [
             ['key' => 'activation', 'label' => 'App activation', 'ok' => filled($device->device_uuid) && $device->tokens->isNotEmpty(), 'detail' => filled($device->device_uuid) ? 'Authenticated device identity received' : 'Waiting for Android activation', 'required' => true],
             ['key' => 'device_owner', 'label' => 'Device Owner', 'ok' => (bool) $device->is_device_owner, 'detail' => $device->is_device_owner ? 'Android reported Device Owner=true' : 'Waiting for Android report', 'required' => true],
@@ -220,6 +290,7 @@ class DeviceSetupController extends Controller
     private function serverCheckPassed(Device $device, string $key): bool
     {
         $checks = collect($this->serverChecks($device->loadMissing(['tokens', 'commands', 'offlinePolicy'])));
+
         return match ($key) {
             'capabilities' => $checks->whereIn('key', ['activation', 'device_owner', 'admin', 'fcm', 'uninstall', 'reset', 'full_lock', 'lock_task', 'sync', 'offline'])->every(fn ($check) => $check['ok']),
             'final' => $checks->where('required', true)->every(fn ($check) => $check['ok']),
@@ -235,13 +306,21 @@ class DeviceSetupController extends Controller
 
     private function macScript(string $url, ?string $checksum): string
     {
-        return "#!/bin/sh\nset -eu\nprintf 'AUTHORIZED setup only. Type YES to continue: '; read ok; [ \"\$ok\" = YES ] || exit 1\nif command -v adb >/dev/null 2>&1; then echo ADB_FOUND; else echo ADB_NOT_FOUND; command -v brew >/dev/null || { echo 'Install official Platform Tools first.'; exit 2; }; brew install android-platform-tools; fi\nadb version\nadb kill-server; adb start-server; adb devices\nadb shell pm list users\nadb shell dumpsys account | grep 'Account {' || echo NO_ACCOUNTS\ncurl -fL ".escapeshellarg($url)." -o deviceguard.apk\n".($checksum ? "echo ".escapeshellarg($checksum)."  deviceguard.apk | shasum -a 256 -c -\n" : '')."adb install -r -t deviceguard.apk\nadb shell pm path com.twinsofte.deviceguard\nadb shell dumpsys package com.twinsofte.deviceguard | grep DevicePolicyReceiver\nprintf 'Checks clean and Device Owner authorized? Type SET-OWNER: '; read own; [ \"\$own\" = SET-OWNER ] || exit 0\nadb shell dpm set-device-owner com.twinsofte.deviceguard/.devicepolicy.DevicePolicyReceiver\nadb shell dumpsys device_policy\nadb shell monkey -p com.twinsofte.deviceguard -c android.intent.category.LAUNCHER 1\nprintf 'HELPER_RESULT: commands finished. Android and server verification are still required in the wizard.\\n'\n";
+        $checksumVerification = $checksum
+            ? 'echo '.escapeshellarg($checksum)."  deviceguard.apk | shasum -a 256 -c -\n"
+            : "printf 'WARNING: APK checksum verification is not configured by Super Admin.\\n'\n";
+
+        return "#!/bin/sh\nset -eu\nprintf 'AUTHORIZED setup only. Type YES to continue: '; read ok; [ \"\$ok\" = YES ] || exit 1\nif command -v adb >/dev/null 2>&1; then echo ADB_FOUND; else echo ADB_NOT_FOUND; command -v brew >/dev/null || { echo 'Install official Platform Tools first.'; exit 2; }; brew install android-platform-tools; fi\nadb version\nadb kill-server; adb start-server; adb devices\nadb shell pm list users\nadb shell dumpsys account | grep 'Account {' || echo NO_ACCOUNTS\ncd ~/Downloads\ncurl -L \\\n\"{$url}\" \\\n-o deviceguard.apk\nls -lh deviceguard.apk\n{$checksumVerification}adb install -r -t deviceguard.apk\nadb shell pm path {$this->apk->packageName()}\nadb shell dumpsys package {$this->apk->packageName()} | grep DevicePolicyReceiver\nprintf 'Checks clean and Device Owner authorized? Type SET-OWNER: '; read own; [ \"\$own\" = SET-OWNER ] || exit 0\nadb shell dpm set-device-owner {$this->apk->receiver()}\nadb shell dumpsys device_policy\nadb shell monkey -p {$this->apk->packageName()} -c android.intent.category.LAUNCHER 1\nprintf 'HELPER_RESULT: commands finished. Android and server verification are still required in the wizard.\\n'\n";
     }
 
     private function windowsScript(string $url, ?string $checksum, ?string $toolsUrl, ?string $toolsChecksum): string
     {
         $url = str_replace("'", "''", $url);
         $toolsUrl = str_replace("'", "''", (string) $toolsUrl);
-        return "\$ErrorActionPreference='Stop'\nif ((Read-Host 'AUTHORIZED setup only. Type YES to continue') -ne 'YES') { exit 1 }\nif ((Get-Command adb -ErrorAction SilentlyContinue) -or (Test-Path 'C:\\platform-tools\\adb.exe')) { Write-Host ADB_FOUND } else { Write-Host ADB_NOT_FOUND\n".($toolsUrl && $toolsChecksum ? "Invoke-WebRequest -Uri '$toolsUrl' -OutFile platform-tools.zip\nif ((Get-FileHash platform-tools.zip -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($toolsChecksum)."') { throw 'Platform Tools checksum mismatch' }\nExpand-Archive platform-tools.zip C:\\ -Force\n" : "throw 'Configure the official Platform Tools URL and SHA-256 in Super Admin settings.'\n")."}\nSet-Location C:\\platform-tools\n.\\adb.exe version\n.\\adb.exe kill-server; .\\adb.exe start-server; .\\adb.exe devices\n.\\adb.exe shell pm list users\n.\\adb.exe shell dumpsys account | Select-String 'Account \\{'\nInvoke-WebRequest -Uri '$url' -OutFile deviceguard.apk\n".($checksum ? "if ((Get-FileHash deviceguard.apk -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($checksum)."') { throw 'APK checksum mismatch' }\n" : '').".\\adb.exe install -r -t deviceguard.apk\n.\\adb.exe shell pm path com.twinsofte.deviceguard\n.\\adb.exe shell dumpsys package com.twinsofte.deviceguard | Select-String DevicePolicyReceiver\nif ((Read-Host 'Checks clean and Device Owner authorized? Type SET-OWNER') -eq 'SET-OWNER') { .\\adb.exe shell dpm set-device-owner com.twinsofte.deviceguard/.devicepolicy.DevicePolicyReceiver; .\\adb.exe shell dumpsys device_policy; .\\adb.exe shell monkey -p com.twinsofte.deviceguard -c android.intent.category.LAUNCHER 1 }\nWrite-Host 'HELPER_RESULT: commands finished. Android and server verification are still required in the wizard.'\n";
+        $checksumVerification = $checksum
+            ? "if ((Get-FileHash .\\deviceguard.apk -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($checksum)."') { throw 'APK checksum mismatch' }\n"
+            : "Write-Warning 'APK checksum verification is not configured by Super Admin.'\n";
+
+        return "\$ErrorActionPreference='Stop'\nif ((Read-Host 'AUTHORIZED setup only. Type YES to continue') -ne 'YES') { exit 1 }\nif ((Get-Command adb -ErrorAction SilentlyContinue) -or (Test-Path 'C:\\platform-tools\\adb.exe')) { Write-Host ADB_FOUND } else { Write-Host ADB_NOT_FOUND\n".($toolsUrl && $toolsChecksum ? "Invoke-WebRequest -Uri '$toolsUrl' -OutFile platform-tools.zip\nif ((Get-FileHash platform-tools.zip -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($toolsChecksum)."') { throw 'Platform Tools checksum mismatch' }\nExpand-Archive platform-tools.zip C:\\ -Force\n" : "throw 'Configure the official Platform Tools URL and SHA-256 in Super Admin settings.'\n")."}\nSet-Location C:\\platform-tools\n.\\adb.exe version\n.\\adb.exe kill-server; .\\adb.exe start-server; .\\adb.exe devices\n.\\adb.exe shell pm list users\n.\\adb.exe shell dumpsys account | Select-String 'Account \\{'\nInvoke-WebRequest `\n-Uri \"{$url}\" `\n-OutFile \".\\deviceguard.apk\"\nGet-Item .\\deviceguard.apk |\nSelect-Object Name, Length, LastWriteTime\n{$checksumVerification}.\\adb.exe install -r -t .\\deviceguard.apk\n.\\adb.exe shell pm path {$this->apk->packageName()}\n.\\adb.exe shell dumpsys package {$this->apk->packageName()} | Select-String DevicePolicyReceiver\nif ((Read-Host 'Checks clean and Device Owner authorized? Type SET-OWNER') -eq 'SET-OWNER') { .\\adb.exe shell dpm set-device-owner {$this->apk->receiver()}; .\\adb.exe shell dumpsys device_policy; .\\adb.exe shell monkey -p {$this->apk->packageName()} -c android.intent.category.LAUNCHER 1 }\nWrite-Host 'HELPER_RESULT: commands finished. Android and server verification are still required in the wizard.'\n";
     }
 }
