@@ -26,7 +26,9 @@ class DeviceActivationCodeController extends Controller
         );
         $activations->sendSmsIfEnabled($device->loadMissing(['customer', 'shop']), $result['plain'], $request->user());
 
-        return back()->with('success', 'A new activation code was generated successfully.');
+        return back()->with('success', $result['legacy_replaced']
+            ? 'A new activation code was generated for compatibility with the installed Android app.'
+            : 'A new activation code was generated successfully.');
     }
 
     public function revoke(Request $request, Device $device, ActivationService $activations)

@@ -78,21 +78,138 @@ class ActivationCodeLifecycleTest extends TestCase
         ];
     }
 
-    public function test_code_is_numeric_encrypted_visible_after_refresh_and_valid_for_24_hours(): void
+    public function test_code_uses_installed_app_format_is_encrypted_visible_after_refresh_and_valid_for_24_hours(): void
     {
         [, $owner, $device] = $this->tenant();
         $result = app(ActivationService::class)->ensure($device, $owner, null, 'test_generation');
 
-        $this->assertMatchesRegularExpression('/^\d{6}$/', $result['plain']);
+        $this->assertMatchesRegularExpression('/^DG-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{7}$/', $result['plain']);
         $this->assertTrue($result['activation']->expires_at->between(now()->addMinutes(1439), now()->addMinutes(1441)));
         $raw = DB::table('device_activations')->where('id', $result['activation']->id)->first();
         $this->assertNotSame($result['plain'], $raw->code_hash);
         $this->assertStringNotContainsString($result['plain'], (string) $raw->encrypted_code);
 
         $this->actingAs($owner)->get(route('devices.show', $device))->assertOk()
-            ->assertSee('Device Activation Code')->assertSee($result['plain'])->assertSee('Copy Code');
+            ->assertSee('Device Activation Code')->assertSee($result['plain'])->assertSee('Copy Code')
+            ->assertSee('including the DG- prefix.');
         $this->actingAs($owner)->get(route('devices.show', $device))->assertOk()->assertSee($result['plain']);
         $this->assertSame(1, $device->activations()->count());
+    }
+
+    public function test_activation_endpoint_accepts_installed_app_codes_and_normalizes_outer_spaces_and_case(): void
+    {
+        [, , $firstDevice] = $this->tenant();
+        DeviceActivation::create([
+            'device_id' => $firstDevice->id,
+            'code_hash' => \Illuminate\Support\Facades\Hash::make('DG-7K4P2M9'),
+            'encrypted_code' => 'DG-7K4P2M9',
+            'expires_at' => now()->addDay(),
+        ]);
+
+        $this->postJson('/api/v1/devices/activate', $this->activationPayload($firstDevice, 'DG-7K4P2M9'))
+            ->assertCreated()
+            ->assertJsonStructure(['message', 'data' => ['device_uuid', 'device_token', 'command_verification_key', 'status']]);
+
+        [, , $secondDevice] = $this->tenant();
+        DeviceActivation::create([
+            'device_id' => $secondDevice->id,
+            'code_hash' => \Illuminate\Support\Facades\Hash::make('DG-ABC1234'),
+            'encrypted_code' => 'DG-ABC1234',
+            'expires_at' => now()->addDay(),
+        ]);
+
+        $this->withServerVariables(['REMOTE_ADDR' => '192.0.2.91'])
+            ->postJson('/api/v1/devices/activate', $this->activationPayload($secondDevice, '  dg-abc1234  '))
+            ->assertCreated();
+    }
+
+    public function test_activation_endpoint_rejects_numeric_and_malformed_codes_with_compatible_error_structure(): void
+    {
+        [, , $device] = $this->tenant();
+        $invalidCodes = [
+            '546250',
+            'DG-ABC123',
+            'DG-ABC12345',
+            'ABC1234',
+            'DG-ABC 234',
+        ];
+
+        foreach ($invalidCodes as $index => $invalidCode) {
+            $this->withServerVariables(['REMOTE_ADDR' => '192.0.2.'.($index + 10)])
+                ->postJson('/api/v1/devices/activate', $this->activationPayload($device, $invalidCode))
+                ->assertUnprocessable()
+                ->assertJsonPath('error_code', 'invalid_activation_code')
+                ->assertJsonPath('message', 'The activation code is invalid, expired, or already used.')
+                ->assertJsonStructure(['message', 'error_code', 'errors' => ['activation_code']]);
+            \Illuminate\Support\Facades\RateLimiter::clear('activation-ip:127.0.0.1');
+            \Illuminate\Support\Facades\RateLimiter::clear('activation-device:'.hash('sha256', $device->uuid));
+        }
+
+    }
+
+    public function test_activation_endpoint_rejects_a_missing_activation_code(): void
+    {
+        [, , $device] = $this->tenant();
+        $payload = $this->activationPayload($device, 'DG-ABC1234');
+        unset($payload['activation_code']);
+
+        $this->postJson('/api/v1/devices/activate', $payload)
+            ->assertUnprocessable()
+            ->assertJsonPath('error_code', 'invalid_activation_code')
+            ->assertJsonPath('message', 'The activation code is invalid, expired, or already used.');
+    }
+
+    public function test_opening_device_page_replaces_active_numeric_code_and_shows_compatibility_notice(): void
+    {
+        [, $owner, $device] = $this->tenant();
+        $legacyPlain = '546250';
+        $legacy = DeviceActivation::create([
+            'device_id' => $device->id,
+            'code_hash' => \Illuminate\Support\Facades\Hash::make($legacyPlain),
+            'encrypted_code' => $legacyPlain,
+            'expires_at' => now()->addDay(),
+        ]);
+
+        $response = $this->actingAs($owner)->get(route('devices.show', $device))->assertOk()
+            ->assertSee('A new activation code was generated for compatibility with the installed Android app.');
+
+        $replacement = $device->activations()->latest('id')->firstOrFail();
+        $this->assertNotNull($legacy->fresh()->revoked_at);
+        $this->assertMatchesRegularExpression('/^DG-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{7}$/', $replacement->encrypted_code);
+        $response->assertSee($replacement->encrypted_code);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'ACTIVATION_LEGACY_CODE_REPLACED', 'device_id' => $device->id]);
+        $this->assertStringNotContainsString($legacyPlain, AuditLog::get()->toJson());
+    }
+
+    public function test_maintenance_command_replaces_only_active_unused_numeric_codes_without_outputting_codes(): void
+    {
+        [, $owner, $device] = $this->tenant();
+        $activePlain = '654321';
+        $active = DeviceActivation::create([
+            'device_id' => $device->id,
+            'code_hash' => \Illuminate\Support\Facades\Hash::make($activePlain),
+            'encrypted_code' => $activePlain,
+            'expires_at' => now()->addDay(),
+        ]);
+        $usedPlain = '123456';
+        $used = DeviceActivation::create([
+            'device_id' => $device->id,
+            'code_hash' => \Illuminate\Support\Facades\Hash::make($usedPlain),
+            'encrypted_code' => $usedPlain,
+            'expires_at' => now()->addDay(),
+            'used_at' => now(),
+        ]);
+
+        $this->artisan('deviceguard:replace-legacy-activation-codes')
+            ->expectsOutput('Legacy activation codes replaced: 1')
+            ->doesntExpectOutputToContain($activePlain)
+            ->doesntExpectOutputToContain($usedPlain)
+            ->assertSuccessful();
+
+        $replacement = $device->activations()->latest('id')->firstOrFail();
+        $this->assertNotNull($active->fresh()->revoked_at);
+        $this->assertNull($used->fresh()->revoked_at);
+        $this->assertMatchesRegularExpression('/^DG-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{7}$/', $replacement->encrypted_code);
     }
 
     public function test_super_admin_configured_expiry_is_applied_to_new_codes(): void
@@ -231,7 +348,7 @@ class ActivationCodeLifecycleTest extends TestCase
     {
         [, $owner, $device] = $this->tenant();
         app(ActivationService::class)->ensure($device, $owner);
-        $payload = $this->activationPayload($device, '999999');
+        $payload = $this->activationPayload($device, 'DG-WRNG234');
 
         for ($attempt = 1; $attempt <= 5; $attempt++) {
             $this->withServerVariables(['REMOTE_ADDR' => '192.0.2.44'])->postJson('/api/v1/devices/activate', $payload)->assertUnprocessable();

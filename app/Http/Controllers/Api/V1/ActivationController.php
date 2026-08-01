@@ -11,8 +11,19 @@ class ActivationController extends Controller
 {
     public function __invoke(Request $request, ActivationService $service)
     {
+        $submittedCode = $request->input('activation_code');
+        if (! is_string($submittedCode)) {
+            return $this->invalidCodeResponse();
+        }
+
+        $normalizedCode = $service->normalizeCode($submittedCode);
+        if (! $service->isCompatibleCode($normalizedCode)) {
+            return $this->invalidCodeResponse();
+        }
+        $request->merge(['activation_code' => $normalizedCode]);
+
         $data = $request->validate([
-            'activation_code' => ['required', 'string', 'max:20'],
+            'activation_code' => ['required', 'string', 'regex:/\ADG-[A-Z0-9]{7}\z/D'],
             'device_reference' => ['nullable', 'uuid'],
             'device_uuid' => ['required', 'uuid'],
             'android_id' => ['nullable', 'string', 'max:255'],
@@ -31,5 +42,16 @@ class ActivationController extends Controller
         }
 
         return response()->json(['message' => 'Device activated.', 'data' => ['device_uuid' => $result['device']->uuid, 'device_token' => $result['token'], 'command_verification_key' => $result['verification_key'], 'status' => $result['device']->status]], 201);
+    }
+
+    private function invalidCodeResponse()
+    {
+        $message = 'The activation code is invalid, expired, or already used.';
+
+        return response()->json([
+            'message' => $message,
+            'error_code' => 'invalid_activation_code',
+            'errors' => ['activation_code' => [$message]],
+        ], 422);
     }
 }

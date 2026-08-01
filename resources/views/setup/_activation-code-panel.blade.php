@@ -7,10 +7,13 @@
     <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
             <p class="text-xs font-black uppercase tracking-wider text-indigo-700">Device Activation Code</p>
-            <h3 class="mt-1 text-xl font-black text-indigo-950">Enter this code in the DeviceGuard Android app</h3>
+            <h3 class="mt-1 text-xl font-black text-indigo-950">Enter the entire code in the DeviceGuard app, including “DG-”.</h3>
         </div>
         @if($activation)<span class="status-pill {{ in_array($activationStatus,['active','expiring_soon'],true)?($activationStatus==='active'?'bg-emerald-100 text-emerald-800':'bg-amber-100 text-amber-800'):'bg-red-100 text-red-800' }}">{{ str($activationStatus)->replace('_',' ')->title() }}</span>@endif
     </div>
+    @if($legacyCompatibilityReplaced ?? false)
+        <div class="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm font-bold text-amber-950">A new activation code was generated for compatibility with the installed Android app.</div>
+    @endif
     @if($activationCode)
         <p id="wizard-activation-code" class="mt-5 font-mono text-4xl font-black tracking-[.3em] text-indigo-950">{{ $activationCode }}</p>
         <p class="mt-3 text-sm text-indigo-900">Expires {{ $activation->expires_at->timezone(App\Models\SystemSetting::value('timezone',config('app.timezone')))->format('d M Y, g:i A') }}</p>

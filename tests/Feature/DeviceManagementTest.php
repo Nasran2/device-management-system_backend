@@ -148,8 +148,8 @@ class DeviceManagementTest extends TestCase
     public function test_activation_is_single_use_and_returns_device_token(): void
     {
         $device = $this->device($this->user());
-        DeviceActivation::create(['device_id' => $device->id, 'code_hash' => Hash::make('ABCD-EFGH'), 'expires_at' => now()->addHour()]);
-        $payload = ['activation_code' => 'ABCD-EFGH', 'device_uuid' => '5c371414-52aa-44a1-9ad7-ca4cbf867c94', 'android_version' => '16', 'app_version' => '1.0.0'];
+        DeviceActivation::create(['device_id' => $device->id, 'code_hash' => Hash::make('DG-ABCD234'), 'expires_at' => now()->addHour()]);
+        $payload = ['activation_code' => 'DG-ABCD234', 'device_uuid' => '5c371414-52aa-44a1-9ad7-ca4cbf867c94', 'android_version' => '16', 'app_version' => '1.0.0'];
 
         $this->postJson('/api/v1/devices/activate', $payload)->assertCreated()->assertJsonPath('data.status', 'active_unlocked')->assertJsonStructure(['data' => ['device_token', 'command_verification_key']]);
         $this->postJson('/api/v1/devices/activate', $payload)->assertConflict()->assertJsonPath('error_code', 'activation_code_used');
@@ -167,12 +167,12 @@ class DeviceManagementTest extends TestCase
     public function test_invalid_and_expired_activation_codes_return_specific_errors(): void
     {
         $device = $this->device($this->user());
-        DeviceActivation::create(['device_id' => $device->id, 'code_hash' => Hash::make('OLD1-CODE'), 'expires_at' => now()->subMinute()]);
+        DeviceActivation::create(['device_id' => $device->id, 'code_hash' => Hash::make('DG-OLD2CDE'), 'expires_at' => now()->subMinute()]);
         $payload = ['device_uuid' => '5c371414-52aa-44a1-9ad7-ca4cbf867c94', 'android_version' => '16', 'app_version' => '1.0.0'];
 
-        $this->postJson('/api/v1/devices/activate', $payload + ['activation_code' => 'WRONG-CODE'])
+        $this->postJson('/api/v1/devices/activate', $payload + ['activation_code' => 'DG-WRNG234'])
             ->assertUnprocessable()->assertJsonPath('error_code', 'invalid_activation_code');
-        $this->postJson('/api/v1/devices/activate', $payload + ['activation_code' => 'OLD1-CODE'])
+        $this->postJson('/api/v1/devices/activate', $payload + ['activation_code' => 'DG-OLD2CDE'])
             ->assertStatus(410)->assertJsonPath('error_code', 'activation_code_expired');
     }
 

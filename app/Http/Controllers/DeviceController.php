@@ -110,6 +110,10 @@ class DeviceController extends Controller
     {
         $this->authorize('view', $device);
         $canViewActivation = $request->user()->can('viewActivationCode', $device);
+        $canGenerateActivation = $request->user()->can('generateActivationCode', $device);
+        $legacyCompatibilityReplaced = $canViewActivation && $canGenerateActivation
+            ? $activations->replaceActiveLegacyNumericCode($device, $request->user())
+            : false;
         $activationState = $canViewActivation
             ? $activations->displayState($device)
             : ['activation' => null, 'plain' => null, 'status' => 'unauthorized'];
@@ -123,8 +127,9 @@ class DeviceController extends Controller
         return view('devices.show', [
             'device' => $device->load(['customer', 'admin', 'shop', 'managementPinChangedBy', 'commands.requester', 'locations', 'offlinePolicy.audits', 'financing.installments', 'commission', 'setupSessions.steps', 'activations.generatedBy']),
             'activationState' => $activationState,
+            'legacyCompatibilityReplaced' => $legacyCompatibilityReplaced,
             'canViewActivationCode' => $canViewActivation,
-            'canGenerateActivationCode' => $request->user()->can('generateActivationCode', $device),
+            'canGenerateActivationCode' => $canGenerateActivation,
             'canRevokeActivationCode' => $request->user()->can('revokeActivationCode', $device),
             'activationHistory' => $request->user()->isSuperAdmin()
                 ? $device->activations()->with('generatedBy')->latest()->limit(20)->get()

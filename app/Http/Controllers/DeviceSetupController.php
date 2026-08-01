@@ -96,12 +96,14 @@ class DeviceSetupController extends Controller
         }
 
         $activationState = ['activation' => null, 'plain' => null, 'status' => 'none'];
+        $legacyCompatibilityReplaced = false;
         if ($step->step_key === 'activation' && $request->user()->can('viewActivationCode', $setup->device)) {
             if ($setup->status === 'in_progress' && $request->user()->can('generateActivationCode', $setup->device)) {
                 $issued = $this->activations->ensure($setup->device, $request->user(), $setup, 'setup_activation_stage');
                 if ($issued['generated']) {
                     $this->activations->sendSmsIfEnabled($setup->device->loadMissing(['customer', 'shop']), $issued['plain'], $request->user());
                 }
+                $legacyCompatibilityReplaced = $issued['legacy_replaced'];
             }
             $activationState = $this->activations->displayState($setup->device);
             if ($activationState['plain'] && $activationState['activation']) {
@@ -118,6 +120,7 @@ class DeviceSetupController extends Controller
             'serverChecks' => $this->serverChecks($setup->device),
             'helperUrl' => URL::temporarySignedRoute('setup.helper', now()->addMinutes(15), ['setup' => $setup, 'os' => $setup->computer_os]),
             'activationState' => $activationState,
+            'legacyCompatibilityReplaced' => $legacyCompatibilityReplaced,
         ]);
     }
 

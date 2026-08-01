@@ -1,8 +1,10 @@
 <?php
 
+use App\Models\DeviceActivation;
 use App\Models\DeviceCommand;
 use App\Models\DeviceLocation;
 use App\Models\SystemSetting;
+use App\Services\ActivationService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
@@ -11,6 +13,27 @@ use Illuminate\Support\Facades\Schedule;
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
+
+Artisan::command('deviceguard:replace-legacy-activation-codes', function () {
+    $replaced = 0;
+    $service = app(ActivationService::class);
+
+    DeviceActivation::query()
+        ->with('device')
+        ->whereNull('used_at')
+        ->whereNull('revoked_at')
+        ->where('expires_at', '>', now())
+        ->orderBy('id')
+        ->chunkById(200, function ($activations) use ($service, &$replaced) {
+            foreach ($activations as $activation) {
+                if ($service->replaceActiveLegacyNumericCode($activation->device)) {
+                    $replaced++;
+                }
+            }
+        });
+
+    $this->info("Legacy activation codes replaced: {$replaced}");
+})->purpose('Replace active unused numeric activation codes with installed-app-compatible codes');
 
 Schedule::call(function () {
     \App\Models\InstallmentSchedule::whereIn('status', ['upcoming', 'due_today', 'partially_paid'])

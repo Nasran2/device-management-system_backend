@@ -15,6 +15,12 @@ use Illuminate\Validation\ValidationException;
 
 class ActivationService
 {
+    public const CODE_PREFIX = 'DG-';
+
+    public const CODE_SUFFIX_LENGTH = 7;
+
+    public const GENERATION_CHARACTERS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
     private const MAX_FAILED_ATTEMPTS = 5;
 
     private const LOCK_MINUTES = 15;
@@ -31,7 +37,7 @@ class ActivationService
         return $this->ensure($device, $user, $setup, $reason, $force)['plain'];
     }
 
-    /** @return array{activation: DeviceActivation, plain: string, generated: bool} */
+    /** @return array{activation: DeviceActivation, plain: string, generated: bool, legacy_replaced: bool} */
     public function ensure(
         Device $device,
         ?User $user = null,
@@ -44,7 +50,7 @@ class ActivationService
         return DB::transaction(function () use ($device, $user, $setup, $reason, $force) {
             Device::whereKey($device->id)->lockForUpdate()->firstOrFail();
             // Serializes code issuance across devices so two concurrent setup sessions
-            // cannot claim the same six-digit code while it is active.
+            // cannot claim the same activation code while it is active.
             DB::table('system_settings')->where('key', 'device_activation_code_expiry_minutes')->lockForUpdate()->first();
             $active = $device->activations()
                 ->whereNull('used_at')
@@ -53,14 +59,30 @@ class ActivationService
                 ->latest('id')
                 ->first();
 
-            if ($active && ! $force) {
-                $plain = $this->plainCode($active);
-                if ($plain !== null) {
+            $legacyReplaced = false;
+            if ($active) {
+                $plain = $this->verifiedPlainCode($active);
+                $legacyNumeric = $plain !== null && $this->isLegacyNumericCode($plain);
+
+                if ($plain !== null && $this->isCompatibleCode($plain) && ! $force) {
                     if ($setup && $active->setup_session_id === null) {
                         $active->update(['setup_session_id' => $setup->id]);
                     }
 
-                    return ['activation' => $active->fresh(), 'plain' => $plain, 'generated' => false];
+                    return ['activation' => $active->fresh(), 'plain' => $plain, 'generated' => false, 'legacy_replaced' => false];
+                }
+
+                if ($legacyNumeric) {
+                    $active->update(['revoked_at' => now()]);
+                    $legacyReplaced = true;
+                    $this->audit->record(
+                        'ACTIVATION_LEGACY_CODE_REPLACED',
+                        'Legacy numeric activation code revoked for installed Android app compatibility',
+                        $user,
+                        $device,
+                        [],
+                        ['activation_uuid' => $active->uuid, 'replacement_format' => 'DG-XXXXXXX'],
+                    );
                 }
             }
 
@@ -70,7 +92,7 @@ class ActivationService
                 ->where('expires_at', '>', now())
                 ->update(['revoked_at' => now()]);
 
-            $plain = $this->uniqueNumericCode();
+            $plain = $this->uniqueCompatibleCode();
             $activation = $device->activations()->create([
                 'setup_session_id' => $setup?->id,
                 'code_hash' => Hash::make($plain),
@@ -90,8 +112,24 @@ class ActivationService
                 ['activation_uuid' => $activation->uuid, 'reason' => $reason, 'expires_at' => $activation->expires_at->toIso8601String()],
             );
 
-            return ['activation' => $activation, 'plain' => $plain, 'generated' => true];
+            return ['activation' => $activation, 'plain' => $plain, 'generated' => true, 'legacy_replaced' => $legacyReplaced];
         });
+    }
+
+    public function replaceActiveLegacyNumericCode(Device $device, ?User $user = null, ?DeviceSetupSession $setup = null): bool
+    {
+        $active = $device->activations()
+            ->whereNull('used_at')
+            ->whereNull('revoked_at')
+            ->where('expires_at', '>', now())
+            ->latest('id')
+            ->first();
+
+        if (! $active || ! $this->isLegacyNumericCode($this->verifiedPlainCode($active) ?? '')) {
+            return false;
+        }
+
+        return $this->ensure($device, $user, $setup, 'legacy_format_compatibility')['legacy_replaced'];
     }
 
     public function expiryMinutes(): int
@@ -101,7 +139,16 @@ class ActivationService
 
     public function plainCode(DeviceActivation $activation): ?string
     {
-        if (! $activation->isUsable() || blank($activation->encrypted_code)) {
+        if (! $activation->isUsable()) {
+            return null;
+        }
+
+        return $this->verifiedPlainCode($activation);
+    }
+
+    private function verifiedPlainCode(DeviceActivation $activation): ?string
+    {
+        if (blank($activation->encrypted_code)) {
             return null;
         }
 
@@ -205,7 +252,13 @@ class ActivationService
 
     public function activate(string $code, array $data): array
     {
-        $normalized = $this->normalize($code);
+        $normalized = $this->normalizeCode($code);
+        if (! $this->isCompatibleCode($normalized)) {
+            throw new DeviceActivationException(
+                'invalid_activation_code',
+                'The activation code is invalid, expired, or already used.',
+            );
+        }
         $device = filled($data['device_reference'] ?? null)
             ? Device::where('uuid', $data['device_reference'])->first()
             : null;
@@ -313,10 +366,15 @@ class ActivationService
         );
     }
 
-    private function uniqueNumericCode(): string
+    private function uniqueCompatibleCode(): string
     {
         for ($attempt = 0; $attempt < 50; $attempt++) {
-            $plain = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+            $suffix = '';
+            $lastIndex = strlen(self::GENERATION_CHARACTERS) - 1;
+            for ($position = 0; $position < self::CODE_SUFFIX_LENGTH; $position++) {
+                $suffix .= self::GENERATION_CHARACTERS[random_int(0, $lastIndex)];
+            }
+            $plain = self::CODE_PREFIX.$suffix;
             $inUse = DeviceActivation::where('code_fingerprint', $this->fingerprint($plain))
                 ->whereNull('used_at')->whereNull('revoked_at')->where('expires_at', '>', now())->exists();
             if (! $inUse) {
@@ -327,13 +385,23 @@ class ActivationService
         throw new \RuntimeException('A unique activation code could not be generated safely.');
     }
 
-    private function normalize(string $code): string
+    public function normalizeCode(string $code): string
     {
         return strtoupper(trim($code));
     }
 
+    public function isCompatibleCode(string $code): bool
+    {
+        return preg_match('/\ADG-[A-Z0-9]{7}\z/D', $code) === 1;
+    }
+
+    public function isLegacyNumericCode(string $code): bool
+    {
+        return preg_match('/\A[0-9]{6}\z/D', $code) === 1;
+    }
+
     private function fingerprint(string $code): string
     {
-        return hash_hmac('sha256', $this->normalize($code), (string) config('app.key'));
+        return hash_hmac('sha256', $this->normalizeCode($code), (string) config('app.key'));
     }
 }

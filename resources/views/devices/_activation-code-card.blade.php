@@ -17,10 +17,13 @@
 @endphp
 <section class="panel mb-6 overflow-hidden border-indigo-100" aria-labelledby="activation-code-title">
     <div class="flex flex-wrap items-start justify-between gap-4 border-b border-slate-100 bg-gradient-to-r from-indigo-50 to-white p-6">
-        <div><p class="eyebrow">Activation</p><h2 id="activation-code-title" class="mt-1 text-2xl font-black text-slate-950">Device Activation Code</h2><p class="mt-2 text-sm text-slate-600">Enter this code in the DeviceGuard Android app to complete activation.</p></div>
+        <div><p class="eyebrow">Activation</p><h2 id="activation-code-title" class="mt-1 text-2xl font-black text-slate-950">Device Activation Code</h2><p class="mt-2 text-sm text-slate-600">Enter this complete code in the DeviceGuard Android app, including the DG- prefix.</p></div>
         <span id="activation-code-status" class="status-pill {{ $badge[1] }}">{{ $badge[0] }}</span>
     </div>
     <div class="p-6">
+        @if($legacyCompatibilityReplaced ?? false)
+            <div class="mb-5 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm font-bold text-amber-950">A new activation code was generated for compatibility with the installed Android app.</div>
+        @endif
         @if($activationCode && $activation)
             <div id="activation-code-live-area">
                 <p id="device-activation-code" class="font-mono text-4xl font-black tracking-[.32em] text-indigo-950 sm:text-5xl">{{ $activationCode }}</p>
@@ -44,8 +47,8 @@
 
         <div class="mt-6 flex flex-wrap gap-3">
             @if($activationCode)<button id="copy-device-activation-code" type="button" class="primary-button">Copy Code</button>@endif
-            @if($canGenerateActivationCode)<button type="button" class="secondary-button" onclick="document.getElementById('generate-activation-code-dialog').showModal()">{{ $isCurrent ? 'Generate New Code' : 'Generate Activation Code' }}</button>@endif
-            @if($canRevokeActivationCode && $isCurrent)<button type="button" class="danger-button" onclick="document.getElementById('revoke-activation-code-dialog').showModal()">Revoke Code</button>@endif
+            @if($canGenerateActivationCode)<button type="button" class="secondary-button" onclick="document.getElementById('generate-activation-code-dialog').showModal()">{{ $isCurrent ? 'Generate New Activation Code' : 'Generate Activation Code' }}</button>@endif
+            @if($canRevokeActivationCode && $isCurrent)<button type="button" class="danger-button" onclick="document.getElementById('revoke-activation-code-dialog').showModal()">Revoke Activation Code</button>@endif
         </div>
 
         @if(auth()->user()->isSuperAdmin() && $activationHistory->isNotEmpty())
