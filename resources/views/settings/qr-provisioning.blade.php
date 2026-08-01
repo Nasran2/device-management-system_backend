@@ -30,11 +30,11 @@
                 <label class="field-label">APK version <x-info text="A human-readable release value used to identify which hosted APK is approved."/>
                     <input class="field-input" name="provisioning_apk_version" required maxlength="50" value="{{ old('provisioning_apk_version', App\Models\SystemSetting::value('provisioning_apk_version', '')) }}">
                 </label>
-                <label class="field-label">APK file SHA-256 <x-info text="Exactly 64 hexadecimal characters calculated from every byte of deviceguard.apk. Windows and macOS helpers use this value for Get-FileHash or shasum verification."/>
+                <label class="field-label">APK file SHA-256 <x-info text="64-character hexadecimal hash of the whole APK file. Used by Windows and macOS setup helpers."/>
                     <input class="field-input font-mono uppercase" name="provisioning_apk_file_sha256" minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" value="{{ old('provisioning_apk_file_sha256', $apkFileSha256) }}" placeholder="64 hexadecimal characters">
                     <span class="mt-1 text-xs font-normal text-slate-500">This is a whole-file hash. It is never used in the Android provisioning QR payload.</span>
                 </label>
-                <label class="field-label">Android provisioning signing-certificate checksum <x-info text="Base64 or Base64URL SHA-256 checksum of the APK signing certificate. Android Setup Wizard uses it only for PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM."/>
+                <label class="field-label">Android provisioning signing-certificate checksum <x-info text="Base64 or Base64URL checksum of the APK signing certificate. Used only in the Android provisioning QR payload."/>
                     <input class="field-input font-mono" name="provisioning_apk_signature_checksum" maxlength="255" value="{{ old('provisioning_apk_signature_checksum', $apkSignatureChecksum) }}" placeholder="Base64 or Base64URL certificate checksum">
                     <span class="mt-1 text-xs font-normal text-slate-500">This is not the APK file hash and must never be compared with Get-FileHash or shasum.</span>
                 </label>

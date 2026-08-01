@@ -387,15 +387,16 @@ class SetupInstructionCatalog
     private function apkInstallCommand(bool $windows, string $url, ?string $fileSha256): string
     {
         if ($windows) {
-            $configuredHash = strtoupper((string) $fileSha256);
-            $checksumCommand = "\n\$ConfiguredApkFileSha256 = '{$configuredHash}'\n".
+            $configuredHash = strtolower((string) $fileSha256);
+            $checksumCommand = "\n\$ExpectedApkSha256 = '{$configuredHash}'\n".
                 "\$apkPath = Join-Path (Get-Location) 'deviceguard.apk'\n".
-                "if ([string]::IsNullOrWhiteSpace(\$ConfiguredApkFileSha256)) { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK file SHA-256 is not configured by Super Admin.\" }\n".
-                "\$actualHash = (Get-FileHash \$apkPath -Algorithm SHA256).Hash.ToUpper()\n".
-                "\$expectedHash = \$ConfiguredApkFileSha256.Trim().ToUpper()\n".
-                "Write-Host \"Expected APK SHA-256: \$expectedHash\"\n".
-                "Write-Host \"Downloaded APK SHA-256: \$actualHash\"\n".
-                "if (\$actualHash -ne \$expectedHash) { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK checksum mismatch. The downloaded APK was removed for safety.\" }\n";
+                "if (\$ExpectedApkSha256 -notmatch '^[0-9A-Fa-f]{64}\$') { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK file SHA-256 is not configured correctly by Super Admin.\" }\n".
+                "\$ActualApkSha256 = (Get-FileHash \$apkPath -Algorithm SHA256).Hash.Trim().ToUpperInvariant()\n".
+                "\$ExpectedApkSha256 = \$ExpectedApkSha256.Trim().ToUpperInvariant()\n".
+                "Write-Host \"Expected APK SHA-256: \$ExpectedApkSha256\"\n".
+                "Write-Host \"Actual APK SHA-256:   \$ActualApkSha256\"\n".
+                "if (\$ActualApkSha256 -ne \$ExpectedApkSha256) { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK checksum mismatch. The downloaded APK was removed for safety.\" }\n".
+                "Write-Host \"APK checksum verified successfully.\" -ForegroundColor Green\n";
 
             return "Set-Location (Join-Path \$HOME 'Downloads')\n".
                 "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\n".
@@ -409,14 +410,15 @@ class SetupInstructionCatalog
                 "adb shell pm path {$this->apk->packageName()}";
         }
 
-        $configuredHash = escapeshellarg(strtoupper((string) $fileSha256));
-        $checksumCommand = "\nCONFIGURED_APK_FILE_SHA256={$configuredHash}\n".
-            "if [ -z \"\$CONFIGURED_APK_FILE_SHA256\" ]; then rm -f deviceguard.apk; echo 'APK file SHA-256 is not configured by Super Admin.' >&2; exit 8; fi\n".
-            "actual_hash=\$(shasum -a 256 deviceguard.apk | awk '{print toupper(\$1)}')\n".
-            "expected_hash=\$(printf '%s' \"\$CONFIGURED_APK_FILE_SHA256\" | tr '[:lower:]' '[:upper:]')\n".
-            "printf 'Expected APK SHA-256: %s\\n' \"\$expected_hash\"\n".
-            "printf 'Downloaded APK SHA-256: %s\\n' \"\$actual_hash\"\n".
-            "if [ \"\$actual_hash\" != \"\$expected_hash\" ]; then rm -f deviceguard.apk; echo 'APK checksum mismatch. The downloaded APK was removed for safety.' >&2; exit 9; fi\n";
+        $configuredHash = escapeshellarg(strtolower((string) $fileSha256));
+        $checksumCommand = "\nEXPECTED_APK_SHA256={$configuredHash}\n".
+            "printf '%s' \"\$EXPECTED_APK_SHA256\" | grep -Eq '^[0-9A-Fa-f]{64}\$' || { rm -f deviceguard.apk; echo 'APK file SHA-256 is not configured correctly by Super Admin.' >&2; exit 8; }\n".
+            "ACTUAL_APK_SHA256=\$(shasum -a 256 deviceguard.apk | awk '{print toupper(\$1)}')\n".
+            "EXPECTED_APK_SHA256=\$(printf '%s' \"\$EXPECTED_APK_SHA256\" | tr '[:lower:]' '[:upper:]')\n".
+            "printf 'Expected APK SHA-256: %s\\n' \"\$EXPECTED_APK_SHA256\"\n".
+            "printf 'Actual APK SHA-256:   %s\\n' \"\$ACTUAL_APK_SHA256\"\n".
+            "if [ \"\$ACTUAL_APK_SHA256\" != \"\$EXPECTED_APK_SHA256\" ]; then rm -f deviceguard.apk; echo 'APK checksum mismatch. The downloaded APK was removed for safety.' >&2; exit 9; fi\n".
+            "echo 'APK checksum verified successfully.'\n";
 
         return "cd ~/Downloads\n\n".
             "curl -L \\\n".

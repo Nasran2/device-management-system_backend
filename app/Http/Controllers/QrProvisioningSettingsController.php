@@ -46,8 +46,8 @@ class QrProvisioningSettingsController extends Controller
             'provisioning_api_url' => ['required', 'url', 'starts_with:https://'],
             'provisioning_apk_url' => ['required', 'url', 'starts_with:https://'],
             'provisioning_apk_version' => ['required', 'string', 'max:50'],
-            'provisioning_apk_file_sha256' => ['nullable', 'string', 'size:64', 'regex:/\A[0-9a-fA-F]{64}\z/'],
-            'provisioning_apk_signature_checksum' => ['nullable', 'string', 'max:255', function (string $attribute, mixed $value, \Closure $fail) {
+            'provisioning_apk_file_sha256' => [Rule::requiredIf(config('app.env') === 'production'), 'nullable', 'string', 'size:64', 'regex:/\A[0-9a-fA-F]{64}\z/'],
+            'provisioning_apk_signature_checksum' => [Rule::requiredIf($request->boolean('qr_provisioning_enabled')), 'nullable', 'string', 'max:255', function (string $attribute, mixed $value, \Closure $fail) {
                 if (! $this->apk->isSignatureChecksum((string) $value)) {
                     $fail('The Android provisioning signing-certificate checksum must use Base64 or Base64URL format.');
                 }

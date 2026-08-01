@@ -47,6 +47,11 @@ class DatabaseSeeder extends Seeder
             ['key' => 'support_phone', 'value' => '+94 11 000 0000', 'type' => 'string', 'is_public' => true],
             ['key' => 'lock_message', 'value' => 'Please complete your pending payment and contact the seller for assistance.', 'type' => 'string', 'is_public' => true],
             ['key' => 'location_retention_days', 'value' => '30', 'type' => 'integer', 'is_public' => false],
+            ['key' => 'provisioning_api_url', 'value' => 'https://phonelock.twinsofte.com/api/v1/', 'type' => 'string', 'is_public' => false],
+            ['key' => 'provisioning_apk_url', 'value' => 'https://phonelock.twinsofte.com/downloads/deviceguard.apk', 'type' => 'string', 'is_public' => false],
+            ['key' => 'provisioning_apk_version', 'value' => '1.0.3', 'type' => 'string', 'is_public' => false],
+            ['key' => 'provisioning_apk_file_sha256', 'value' => '6c4c34d1c2da39b514c9864d0b4846d9324d91c194e04479a428cc2190e8f49a', 'type' => 'string', 'is_public' => false],
+            ['key' => 'provisioning_apk_signature_checksum', 'value' => 'wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo', 'type' => 'string', 'is_public' => false],
         ], ['key'], ['value', 'type', 'is_public']);
 
         $statuses = ['pending_activation', 'active_unlocked', 'locked', 'offline', 'active_unlocked', 'locked', 'permanently_released', 'active_unlocked', 'offline', 'active_unlocked'];

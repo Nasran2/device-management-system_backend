@@ -226,6 +226,15 @@ class DeviceSetupController extends Controller
         abort_unless($os === $setup->computer_os, 403);
         $url = $this->apk->url();
         $fileSha256 = $this->apk->fileSha256();
+        $headers = [
+            'Content-Type' => 'text/plain; charset=UTF-8',
+            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma' => 'no-cache',
+            'Expires' => '0',
+        ];
+        if ($fileSha256 === null) {
+            return response('APK file SHA-256 is not configured correctly by Super Admin.', 422, $headers);
+        }
         $toolsPrefix = $os === 'macos' ? 'macos' : 'windows';
         $toolsUrl = SystemSetting::value($toolsPrefix.'_platform_tools_url') ?: SetupInstructionCatalog::platformToolsUrl($os);
         $toolsChecksum = SystemSetting::value($toolsPrefix.'_platform_tools_checksum');
@@ -233,8 +242,9 @@ class DeviceSetupController extends Controller
             ? $this->macScript($url, $fileSha256, $toolsUrl, $toolsChecksum)
             : $this->windowsScript($url, $fileSha256, $toolsUrl, $toolsChecksum);
 
-        return response($script)->header('Content-Type', 'text/plain')
-            ->header('Content-Disposition', 'attachment; filename="deviceguard-setup.'.($os === 'macos' ? 'sh' : 'ps1').'"');
+        $headers['Content-Disposition'] = 'attachment; filename="deviceguard-setup.'.($os === 'macos' ? 'sh' : 'ps1').'"';
+
+        return response($script, 200, $headers);
     }
 
     public function restart(Request $request, DeviceSetupSession $setup, AuditService $audit)
@@ -350,14 +360,15 @@ class DeviceSetupController extends Controller
 
     private function macScript(string $url, ?string $fileSha256, string $toolsUrl, ?string $toolsChecksum): string
     {
-        $configuredHash = escapeshellarg(strtoupper((string) $fileSha256));
-        $checksumVerification = "CONFIGURED_APK_FILE_SHA256={$configuredHash}\n".
-            "if [ -z \"\$CONFIGURED_APK_FILE_SHA256\" ]; then rm -f deviceguard.apk; printf 'APK file SHA-256 is not configured by Super Admin.\\n' >&2; exit 8; fi\n".
-            "actual_hash=\$(shasum -a 256 deviceguard.apk | awk '{print toupper(\$1)}')\n".
-            "expected_hash=\$(printf '%s' \"\$CONFIGURED_APK_FILE_SHA256\" | tr '[:lower:]' '[:upper:]')\n".
-            "printf 'Expected APK SHA-256: %s\\n' \"\$expected_hash\"\n".
-            "printf 'Downloaded APK SHA-256: %s\\n' \"\$actual_hash\"\n".
-            "if [ \"\$actual_hash\" != \"\$expected_hash\" ]; then rm -f deviceguard.apk; printf 'APK checksum mismatch. The downloaded APK was removed for safety.\\n' >&2; exit 9; fi\n";
+        $configuredHash = escapeshellarg(strtolower((string) $fileSha256));
+        $checksumVerification = "EXPECTED_APK_SHA256={$configuredHash}\n".
+            "printf '%s' \"\$EXPECTED_APK_SHA256\" | grep -Eq '^[0-9A-Fa-f]{64}\$' || { rm -f deviceguard.apk; printf 'APK file SHA-256 is not configured correctly by Super Admin.\\n' >&2; exit 8; }\n".
+            "ACTUAL_APK_SHA256=\$(shasum -a 256 deviceguard.apk | awk '{print toupper(\$1)}')\n".
+            "EXPECTED_APK_SHA256=\$(printf '%s' \"\$EXPECTED_APK_SHA256\" | tr '[:lower:]' '[:upper:]')\n".
+            "printf 'Expected APK SHA-256: %s\\n' \"\$EXPECTED_APK_SHA256\"\n".
+            "printf 'Actual APK SHA-256:   %s\\n' \"\$ACTUAL_APK_SHA256\"\n".
+            "if [ \"\$ACTUAL_APK_SHA256\" != \"\$EXPECTED_APK_SHA256\" ]; then rm -f deviceguard.apk; printf 'APK checksum mismatch. The downloaded APK was removed for safety.\\n' >&2; exit 9; fi\n".
+            "printf 'APK checksum verified successfully.\\n'\n";
         $toolsChecksumVerification = $toolsChecksum
             ? 'echo '.escapeshellarg(strtolower($toolsChecksum))."  \"\$TOOLS_ZIP\" | shasum -a 256 -c -\n"
             : "printf 'WARNING: Platform Tools checksum is not configured; using the approved Google HTTPS source.\\n'\n";
@@ -380,7 +391,7 @@ class DeviceSetupController extends Controller
             "ROWS=\"\$(adb devices | sed '1d' | sed '/^[[:space:]]*\$/d')\"\nCOUNT=\$(printf '%s\\n' \"\$ROWS\" | grep -c . || true)\n[ \"\$COUNT\" -eq 1 ] || { printf 'STOP: Connect exactly one Android phone. Found %s.\\n' \"\$COUNT\"; adb devices; exit 3; }\nprintf '%s\\n' \"\$ROWS\" | grep -Eq '[[:space:]]device\$' || { printf 'STOP: Unlock the phone and accept the USB debugging fingerprint, then run the helper again.\\n'; adb devices; exit 4; }\n".
             "printf '\\n[3/7] Checking Android users and accounts...\\n'\nUSERS=\"\$(adb shell pm list users)\"; printf '%s\\n' \"\$USERS\"\nUSER_COUNT=\$(printf '%s\\n' \"\$USERS\" | grep -c 'UserInfo{' || true)\n[ \"\$USER_COUNT\" -eq 1 ] && printf '%s\\n' \"\$USERS\" | grep -q 'UserInfo{0:' || { printf 'STOP: Android must contain only primary user 0. Remove extra users manually or repeat the authorized reset.\\n'; exit 5; }\n".
             "if adb shell dumpsys account | grep -q 'Account {'; then printf 'STOP: Remove every Google/manufacturer account in phone Settings, then run the helper again.\\n'; exit 6; else echo NO_ACCOUNTS; fi\n".
-            "printf '\\n[4/7] Downloading and verifying DeviceGuard...\\n'\ncd \"\$HOME/Downloads\"\ncurl --fail --location ".escapeshellarg($url)." --output deviceguard.apk\n[ -s deviceguard.apk ] || { echo 'STOP: DeviceGuard APK download is empty.'; exit 7; }\n{$checksumVerification}".
+            "printf '\\n[4/7] Downloading and verifying DeviceGuard...\\n'\ncd \"\$HOME/Downloads\"\nprintf 'APK URL: %s\\n' ".escapeshellarg($url)."\nif ! curl --fail --location ".escapeshellarg($url)." --output deviceguard.apk; then rm -f deviceguard.apk; printf 'APK download failed. Confirm the URL is reachable and does not return HTTP 404.\\n' >&2; exit 7; fi\n[ -s deviceguard.apk ] || { rm -f deviceguard.apk; echo 'APK download failed: DeviceGuard APK is empty.'; exit 7; }\n{$checksumVerification}".
             "printf '\\n[5/7] Installing DeviceGuard...\\n'\nadb install -r -t deviceguard.apk\nadb shell pm path {$package} | grep -q '^package:' || { echo 'STOP: DeviceGuard package verification failed.'; exit 8; }\nadb shell dumpsys package {$package} | grep -q DevicePolicyReceiver || { echo 'STOP: Device Admin receiver is missing.'; exit 9; }\n".
             "printf '\\n[6/7] Device Owner is the sensitive final computer action.\\nType SET-OWNER only after the wizard confirms authorization, primary user 0, and no accounts: '; read own; [ \"\$own\" = SET-OWNER ] || { echo 'Stopped safely before Device Owner assignment.'; exit 0; }\nadb shell dpm set-device-owner {$receiver}\nadb shell dumpsys device_policy | grep -q '{$package}' || { echo 'STOP: Android did not confirm DeviceGuard as Device Owner.'; exit 10; }\n".
             "printf '\\n[7/7] Opening DeviceGuard...\\n'\nadb shell monkey -p {$package} -c android.intent.category.LAUNCHER 1 >/dev/null\nprintf '\\nHELPER_RESULT: Local checks passed. Return to the browser wizard for activation, server checks, lock/unlock, reboot, and USB-debugging cleanup.\\n'\n";
@@ -390,15 +401,16 @@ class DeviceSetupController extends Controller
     {
         $url = str_replace("'", "''", $url);
         $toolsUrl = str_replace("'", "''", (string) $toolsUrl);
-        $configuredHash = strtoupper((string) $fileSha256);
-        $checksumVerification = "\$ConfiguredApkFileSha256 = '{$configuredHash}'\n".
+        $configuredHash = strtolower((string) $fileSha256);
+        $checksumVerification = "\$ExpectedApkSha256 = '{$configuredHash}'\n".
             "\$apkPath = Join-Path (Get-Location) 'deviceguard.apk'\n".
-            "if ([string]::IsNullOrWhiteSpace(\$ConfiguredApkFileSha256)) { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK file SHA-256 is not configured by Super Admin.\" }\n".
-            "\$actualHash = (Get-FileHash \$apkPath -Algorithm SHA256).Hash.ToUpper()\n".
-            "\$expectedHash = \$ConfiguredApkFileSha256.Trim().ToUpper()\n".
-            "Write-Host \"Expected APK SHA-256: \$expectedHash\"\n".
-            "Write-Host \"Downloaded APK SHA-256: \$actualHash\"\n".
-            "if (\$actualHash -ne \$expectedHash) { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK checksum mismatch. The downloaded APK was removed for safety.\" }\n";
+            "if (\$ExpectedApkSha256 -notmatch '^[0-9A-Fa-f]{64}\$') { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK file SHA-256 is not configured correctly by Super Admin.\" }\n".
+            "\$ActualApkSha256 = (Get-FileHash \$apkPath -Algorithm SHA256).Hash.Trim().ToUpperInvariant()\n".
+            "\$ExpectedApkSha256 = \$ExpectedApkSha256.Trim().ToUpperInvariant()\n".
+            "Write-Host \"Expected APK SHA-256: \$ExpectedApkSha256\"\n".
+            "Write-Host \"Actual APK SHA-256:   \$ActualApkSha256\"\n".
+            "if (\$ActualApkSha256 -ne \$ExpectedApkSha256) { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK checksum mismatch. The downloaded APK was removed for safety.\" }\n".
+            "Write-Host \"APK checksum verified successfully.\" -ForegroundColor Green\n";
 
         $toolsChecksumVerification = $toolsChecksum
             ? "if ((Get-FileHash \$toolsZip -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($toolsChecksum)."') { throw 'Platform Tools checksum mismatch. Delete the ZIP and stop.' }\n"
@@ -422,7 +434,7 @@ class DeviceSetupController extends Controller
             "Write-Host \"`n[2/7] Checking the connected phone...\"\nadb kill-server | Out-Null; adb start-server | Out-Null\n".
             "\$deviceRows = @(adb devices | Select-Object -Skip 1 | Where-Object { \$_.Trim() -ne '' })\nif (\$deviceRows.Count -ne 1) { adb devices; throw \"Connect exactly one Android phone. Found \$(\$deviceRows.Count).\" }\nif (\$deviceRows[0] -notmatch '\\sdevice\$') { adb devices; throw 'Unlock the phone and accept the USB debugging fingerprint, then run the helper again.' }\n".
             "Write-Host \"`n[3/7] Checking Android users and accounts...\"\n\$users = @(adb shell pm list users); \$users | Write-Host\n\$userRows = @(\$users | Select-String 'UserInfo\\{')\nif (\$userRows.Count -ne 1 -or \$userRows[0].Line -notmatch 'UserInfo\\{0:') { throw 'Android must contain only primary user 0. Remove extra users manually or repeat the authorized reset.' }\nif (adb shell dumpsys account | Select-String 'Account \\{') { throw 'Remove every Google/manufacturer account in phone Settings, then run the helper again.' } else { Write-Host NO_ACCOUNTS }\n".
-            "Write-Host \"`n[4/7] Downloading and verifying DeviceGuard...\"\nSet-Location (Join-Path \$HOME 'Downloads')\nInvoke-WebRequest -UseBasicParsing `\n-Uri \"{$url}\" `\n-OutFile \".\\deviceguard.apk\"\nif (-not (Test-Path .\\deviceguard.apk) -or (Get-Item .\\deviceguard.apk).Length -le 0) { throw 'DeviceGuard APK download is empty.' }\n{$checksumVerification}".
+            "Write-Host \"`n[4/7] Downloading and verifying DeviceGuard...\"\nSet-Location (Join-Path \$HOME 'Downloads')\n\$ApkUrl = '{$url}'\nWrite-Host \"APK URL: \$ApkUrl\"\ntry { Invoke-WebRequest -UseBasicParsing -Uri \$ApkUrl -OutFile \".\\deviceguard.apk\" } catch { Remove-Item \".\\deviceguard.apk\" -Force -ErrorAction SilentlyContinue; throw \"APK download failed (including possible HTTP 404): \$(\$_.Exception.Message)\" }\nif (-not (Test-Path .\\deviceguard.apk) -or (Get-Item .\\deviceguard.apk).Length -le 0) { Remove-Item \".\\deviceguard.apk\" -Force -ErrorAction SilentlyContinue; throw 'APK download failed: DeviceGuard APK is empty.' }\n{$checksumVerification}".
             "Write-Host \"`n[5/7] Installing DeviceGuard...\"\nadb install -r -t .\\deviceguard.apk\nif (-not (adb shell pm path {$package} | Select-String '^package:')) { throw 'DeviceGuard package verification failed.' }\nif (-not (adb shell dumpsys package {$package} | Select-String DevicePolicyReceiver)) { throw 'Device Admin receiver is missing.' }\n".
             "Write-Host \"`n[6/7] Device Owner is the sensitive final computer action.\"\nif ((Read-Host 'Type SET-OWNER only after the wizard confirms authorization, primary user 0, and no accounts') -ne 'SET-OWNER') { Write-Host 'Stopped safely before Device Owner assignment.'; exit 0 }\nadb shell dpm set-device-owner {$receiver}\nif (-not (adb shell dumpsys device_policy | Select-String '{$package}')) { throw 'Android did not confirm DeviceGuard as Device Owner.' }\n".
             "Write-Host \"`n[7/7] Opening DeviceGuard...\"\nadb shell monkey -p {$package} -c android.intent.category.LAUNCHER 1 | Out-Null\nWrite-Host \"`nHELPER_RESULT: Local checks passed. Return to the browser wizard for activation, server checks, lock/unlock, reboot, and USB-debugging cleanup.\"\n";

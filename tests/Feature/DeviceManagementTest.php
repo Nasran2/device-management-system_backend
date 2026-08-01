@@ -603,6 +603,22 @@ class DeviceManagementTest extends TestCase
         $this->assertNull($settings->fileSha256());
     }
 
+    public function test_apk_settings_migration_moves_legacy_checksum_only_to_signature_and_seeds_verified_distribution_values(): void
+    {
+        $legacy = 'wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo';
+        SystemSetting::create(['key' => DeviceGuardApkSettings::LEGACY_SETTING_CHECKSUM, 'value' => $legacy, 'type' => 'string']);
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_URL, 'value' => 'https://phonelock.twinsofte.com/downloads/deviceguard.apk', 'type' => 'string']);
+
+        $migration = include database_path('migrations/2026_08_01_210000_separate_apk_file_and_signature_checksums.php');
+        $migration->up();
+
+        $this->assertDatabaseHas('system_settings', ['key' => DeviceGuardApkSettings::SETTING_SIGNATURE_CHECKSUM, 'value' => $legacy]);
+        $this->assertDatabaseHas('system_settings', ['key' => DeviceGuardApkSettings::SETTING_FILE_SHA256, 'value' => '6c4c34d1c2da39b514c9864d0b4846d9324d91c194e04479a428cc2190e8f49a']);
+        $this->assertDatabaseMissing('system_settings', ['key' => DeviceGuardApkSettings::SETTING_FILE_SHA256, 'value' => $legacy]);
+        $this->assertDatabaseHas('system_settings', ['key' => 'provisioning_apk_version', 'value' => '1.0.3']);
+        $this->assertDatabaseHas('system_settings', ['key' => 'provisioning_api_url', 'value' => 'https://phonelock.twinsofte.com/api/v1/']);
+    }
+
     public function test_apk_url_uses_phonelock_host_and_retires_the_wrong_phone_host(): void
     {
         $settings = app(DeviceGuardApkSettings::class);
@@ -621,6 +637,23 @@ class DeviceManagementTest extends TestCase
         $response = $this->actingAs($super)->put(route('settings.qr-provisioning.update'), $this->qrSettingsPayload([
             'provisioning_apk_file_sha256' => 'wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo',
             'provisioning_apk_signature_checksum' => '***not-base64***',
+        ]));
+
+        $response->assertSessionHasErrors([
+            'provisioning_apk_file_sha256',
+            'provisioning_apk_signature_checksum',
+        ]);
+    }
+
+    public function test_production_requires_file_hash_and_enabled_qr_requires_signature_checksum(): void
+    {
+        $super = $this->user('super_admin');
+        config(['app.env' => 'production']);
+
+        $response = $this->actingAs($super)->put(route('settings.qr-provisioning.update'), $this->qrSettingsPayload([
+            'provisioning_apk_file_sha256' => '',
+            'provisioning_apk_signature_checksum' => '',
+            'qr_provisioning_enabled' => 1,
         ]));
 
         $response->assertSessionHasErrors([
