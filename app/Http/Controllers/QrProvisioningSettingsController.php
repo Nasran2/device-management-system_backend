@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\SystemSetting;
+use App\Services\ApkFileIntegrity;
 use App\Services\DeviceGuardApkSettings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
@@ -12,7 +13,7 @@ use Illuminate\Validation\ValidationException;
 
 class QrProvisioningSettingsController extends Controller
 {
-    public function __construct(private DeviceGuardApkSettings $apk) {}
+    public function __construct(private DeviceGuardApkSettings $apk, private ApkFileIntegrity $integrity) {}
 
     private function super(Request $request): void
     {
@@ -25,7 +26,8 @@ class QrProvisioningSettingsController extends Controller
 
         return view('settings.qr-provisioning', [
             'apkUrl' => $this->apk->url(),
-            'apkChecksum' => $this->apk->checksum(),
+            'apkFileSha256' => $this->apk->fileSha256(),
+            'apkSignatureChecksum' => $this->apk->signatureChecksum(),
             'packageName' => $this->apk->packageName(),
             'deviceAdminReceiver' => $this->apk->receiver(),
         ]);
@@ -44,7 +46,12 @@ class QrProvisioningSettingsController extends Controller
             'provisioning_api_url' => ['required', 'url', 'starts_with:https://'],
             'provisioning_apk_url' => ['required', 'url', 'starts_with:https://'],
             'provisioning_apk_version' => ['required', 'string', 'max:50'],
-            'provisioning_apk_checksum' => ['nullable', 'string', 'max:255'],
+            'provisioning_apk_file_sha256' => ['nullable', 'string', 'size:64', 'regex:/\A[0-9a-fA-F]{64}\z/'],
+            'provisioning_apk_signature_checksum' => ['nullable', 'string', 'max:255', function (string $attribute, mixed $value, \Closure $fail) {
+                if (! $this->apk->isSignatureChecksum((string) $value)) {
+                    $fail('The Android provisioning signing-certificate checksum must use Base64 or Base64URL format.');
+                }
+            }],
             'provisioning_package_name' => ['nullable', 'in:'.$this->apk->packageName()],
             'provisioning_device_admin_receiver' => ['nullable', 'in:'.$this->apk->receiver()],
             'provisioning_qr_expiry_minutes' => ['required', 'integer', 'between:5,1440'],
@@ -67,9 +74,10 @@ class QrProvisioningSettingsController extends Controller
         $data['provisioning_package_name'] = $data['provisioning_package_name'] ?? $this->apk->packageName();
         $data['provisioning_device_admin_receiver'] = $data['provisioning_device_admin_receiver'] ?? $this->apk->receiver();
 
-        foreach (['provisioning_api_url', 'provisioning_apk_url', 'provisioning_apk_version', 'provisioning_apk_checksum', 'provisioning_package_name', 'provisioning_device_admin_receiver', 'provisioning_qr_expiry_minutes', 'provisioning_support_phone', 'windows_platform_tools_url', 'windows_platform_tools_checksum', 'macos_platform_tools_url', 'macos_platform_tools_checksum'] as $key) {
+        foreach (['provisioning_api_url', 'provisioning_apk_url', 'provisioning_apk_version', 'provisioning_apk_file_sha256', 'provisioning_apk_signature_checksum', 'provisioning_package_name', 'provisioning_device_admin_receiver', 'provisioning_qr_expiry_minutes', 'provisioning_support_phone', 'windows_platform_tools_url', 'windows_platform_tools_checksum', 'macos_platform_tools_url', 'macos_platform_tools_checksum'] as $key) {
             SystemSetting::updateOrCreate(['key' => $key], ['value' => $data[$key] ?? null, 'type' => $key === 'provisioning_qr_expiry_minutes' ? 'integer' : 'string']);
         }
+        SystemSetting::where('key', DeviceGuardApkSettings::LEGACY_SETTING_CHECKSUM)->delete();
         SystemSetting::updateOrCreate(['key' => 'qr_provisioning_enabled'], ['value' => $request->boolean('qr_provisioning_enabled') ? 'true' : 'false', 'type' => 'boolean']);
 
         if ($ssid === '') {
@@ -104,14 +112,23 @@ class QrProvisioningSettingsController extends Controller
         $this->super($request);
         $result = $this->inspectApkDownload($this->apk->url(), true);
 
-        if ($result['passed'] && $this->apk->checksum()) {
-            $result['matches'] = hash_equals(strtolower($this->apk->checksum()), strtolower($result['sha256']));
+        if (($result['download_passed'] ?? false) && $request->boolean('save') && isset($result['sha256'])) {
+            SystemSetting::updateOrCreate(
+                ['key' => DeviceGuardApkSettings::SETTING_FILE_SHA256],
+                ['value' => strtoupper($result['sha256']), 'type' => 'string'],
+            );
+            $result['matches'] = true;
+            $result['passed'] = true;
+            $result['expected_sha256'] = strtoupper($result['sha256']);
+            $result['message'] = 'The freshly downloaded hosted APK SHA-256 was saved as the approved APK file hash.';
+        } elseif (($result['download_passed'] ?? false) && $this->apk->fileSha256()) {
+            $result['matches'] = hash_equals($this->apk->fileSha256(), strtoupper($result['sha256']));
             $result['passed'] = $result['matches'];
             $result['message'] = $result['matches']
-                ? 'The downloaded APK matches the saved SHA-256 checksum.'
-                : 'The downloaded APK does not match the saved SHA-256 checksum.';
-        } elseif ($result['passed']) {
-            $result['message'] = 'APK checksum calculated. Save this value after independently confirming the approved release.';
+                ? 'The downloaded APK matches the saved APK file SHA-256.'
+                : 'The downloaded APK does not match the saved APK file SHA-256 and the temporary download was removed.';
+        } elseif ($result['download_passed'] ?? false) {
+            $result['message'] = 'Hosted APK SHA-256 calculated. Confirm the approved release, then use “Save hosted APK SHA-256”.';
         }
 
         return back()
@@ -125,13 +142,15 @@ class QrProvisioningSettingsController extends Controller
         $apiUrl = trim((string) SystemSetting::value('provisioning_api_url', ''));
         $apkUrl = $this->apk->url();
         $version = trim((string) SystemSetting::value('provisioning_apk_version', ''));
-        $checksum = (string) ($this->apk->checksum() ?? '');
+        $signatureChecksum = (string) ($this->apk->signatureChecksum() ?? '');
+        $fileSha256 = (string) ($this->apk->fileSha256() ?? '');
         $enabled = (bool) SystemSetting::value('qr_provisioning_enabled', false);
         $checks = [
             'API health endpoint' => ['passed' => false, 'message' => 'Not checked.'],
             'APK download' => ['passed' => false, 'message' => 'Not checked.'],
             'APK content type' => ['passed' => false, 'message' => 'Not checked.'],
-            'Signing checksum configured' => ['passed' => $checksum !== '', 'message' => $checksum !== '' ? 'Configured.' : 'Signing certificate checksum is missing.'],
+            'APK file SHA-256 configured' => ['passed' => $fileSha256 !== '', 'message' => $fileSha256 !== '' ? 'Configured.' : 'APK file SHA-256 is missing.'],
+            'Signing checksum configured' => ['passed' => $signatureChecksum !== '', 'message' => $signatureChecksum !== '' ? 'Configured.' : 'Signing certificate checksum is missing.'],
             'QR provisioning enabled' => ['passed' => $enabled, 'message' => $enabled ? 'Enabled.' : 'QR provisioning is disabled.'],
         ];
         $errors = [];
@@ -151,7 +170,10 @@ class QrProvisioningSettingsController extends Controller
         if ($version === '') {
             $errors[] = 'APK version is missing.';
         }
-        if ($checksum === '') {
+        if ($fileSha256 === '') {
+            $errors[] = 'APK file SHA-256 is missing.';
+        }
+        if ($signatureChecksum === '') {
             $errors[] = 'Signing certificate checksum is missing.';
         }
         if (! $enabled) {
@@ -217,11 +239,24 @@ class QrProvisioningSettingsController extends Controller
         if ($host === '' || in_array($host, ['localhost', '127.0.0.1', '::1'], true)) {
             return true;
         }
-        if (! filter_var($host, FILTER_VALIDATE_IP)) {
-            return false;
+
+        $addresses = filter_var($host, FILTER_VALIDATE_IP) ? [$host] : [];
+        if ($addresses === []) {
+            foreach (@dns_get_record($host, DNS_A | DNS_AAAA) ?: [] as $record) {
+                $address = $record['ip'] ?? $record['ipv6'] ?? null;
+                if (is_string($address)) {
+                    $addresses[] = $address;
+                }
+            }
         }
 
-        return filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
+        foreach ($addresses as $address) {
+            if (filter_var($address, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function inspectApkDownload(string $url, bool $calculateChecksum): array
@@ -244,7 +279,7 @@ class QrProvisioningSettingsController extends Controller
         }
 
         try {
-            $response = Http::timeout(90)->withOptions(['sink' => $temporaryPath])->get($url);
+            $response = Http::timeout(90)->withOptions(['sink' => $temporaryPath, 'allow_redirects' => false])->get($url);
             $checks['HTTP status is 200'] = $response->status() === 200;
             $size = is_file($temporaryPath) ? (int) filesize($temporaryPath) : 0;
             $checks['File size is greater than zero'] = $size > 0;
@@ -258,12 +293,20 @@ class QrProvisioningSettingsController extends Controller
                 || str_contains($contentType, 'application/octet-stream');
             $passed = ! in_array(false, $checks, true);
             $result = compact('url', 'checks', 'size', 'contentType', 'passed') + [
+                'download_passed' => $passed,
                 'message' => $passed
                     ? 'APK URL test passed: deviceguard.apk is downloadable and non-empty.'
                     : 'APK URL test failed. Review each APK download check.',
             ];
             if ($calculateChecksum && $size > 0 && ! $isHtml) {
-                $result['sha256'] = hash_file('sha256', $temporaryPath);
+                $result['sha256'] = strtoupper((string) hash_file('sha256', $temporaryPath));
+                if ($expectedHash = $this->apk->fileSha256()) {
+                    $verification = $this->integrity->verify($temporaryPath, $expectedHash, true);
+                    $result['expected_sha256'] = $verification['expectedHash'];
+                    $result['sha256'] = $verification['actualHash'];
+                    $result['matches'] = $verification['passed'];
+                    $result['mismatched_file_removed'] = $verification['removed'];
+                }
             }
 
             return $result;

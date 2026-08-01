@@ -225,13 +225,13 @@ class DeviceSetupController extends Controller
         abort_unless($setup->status === 'in_progress', 410, 'This setup helper link is no longer active.');
         abort_unless($os === $setup->computer_os, 403);
         $url = $this->apk->url();
-        $checksum = $this->apk->checksum();
+        $fileSha256 = $this->apk->fileSha256();
         $toolsPrefix = $os === 'macos' ? 'macos' : 'windows';
         $toolsUrl = SystemSetting::value($toolsPrefix.'_platform_tools_url') ?: SetupInstructionCatalog::platformToolsUrl($os);
         $toolsChecksum = SystemSetting::value($toolsPrefix.'_platform_tools_checksum');
         $script = $os === 'macos'
-            ? $this->macScript($url, $checksum, $toolsUrl, $toolsChecksum)
-            : $this->windowsScript($url, $checksum, $toolsUrl, $toolsChecksum);
+            ? $this->macScript($url, $fileSha256, $toolsUrl, $toolsChecksum)
+            : $this->windowsScript($url, $fileSha256, $toolsUrl, $toolsChecksum);
 
         return response($script)->header('Content-Type', 'text/plain')
             ->header('Content-Disposition', 'attachment; filename="deviceguard-setup.'.($os === 'macos' ? 'sh' : 'ps1').'"');
@@ -348,11 +348,16 @@ class DeviceSetupController extends Controller
         abort_unless($request->user()->isSuperAdmin() || $session->shop_id === $request->user()->shop_id, 403);
     }
 
-    private function macScript(string $url, ?string $checksum, string $toolsUrl, ?string $toolsChecksum): string
+    private function macScript(string $url, ?string $fileSha256, string $toolsUrl, ?string $toolsChecksum): string
     {
-        $checksumVerification = $checksum
-            ? 'echo '.escapeshellarg($checksum)."  deviceguard.apk | shasum -a 256 -c -\n"
-            : "printf 'WARNING: APK checksum verification is not configured by Super Admin.\\n'\n";
+        $configuredHash = escapeshellarg(strtoupper((string) $fileSha256));
+        $checksumVerification = "CONFIGURED_APK_FILE_SHA256={$configuredHash}\n".
+            "if [ -z \"\$CONFIGURED_APK_FILE_SHA256\" ]; then rm -f deviceguard.apk; printf 'APK file SHA-256 is not configured by Super Admin.\\n' >&2; exit 8; fi\n".
+            "actual_hash=\$(shasum -a 256 deviceguard.apk | awk '{print toupper(\$1)}')\n".
+            "expected_hash=\$(printf '%s' \"\$CONFIGURED_APK_FILE_SHA256\" | tr '[:lower:]' '[:upper:]')\n".
+            "printf 'Expected APK SHA-256: %s\\n' \"\$expected_hash\"\n".
+            "printf 'Downloaded APK SHA-256: %s\\n' \"\$actual_hash\"\n".
+            "if [ \"\$actual_hash\" != \"\$expected_hash\" ]; then rm -f deviceguard.apk; printf 'APK checksum mismatch. The downloaded APK was removed for safety.\\n' >&2; exit 9; fi\n";
         $toolsChecksumVerification = $toolsChecksum
             ? 'echo '.escapeshellarg(strtolower($toolsChecksum))."  \"\$TOOLS_ZIP\" | shasum -a 256 -c -\n"
             : "printf 'WARNING: Platform Tools checksum is not configured; using the approved Google HTTPS source.\\n'\n";
@@ -381,13 +386,19 @@ class DeviceSetupController extends Controller
             "printf '\\n[7/7] Opening DeviceGuard...\\n'\nadb shell monkey -p {$package} -c android.intent.category.LAUNCHER 1 >/dev/null\nprintf '\\nHELPER_RESULT: Local checks passed. Return to the browser wizard for activation, server checks, lock/unlock, reboot, and USB-debugging cleanup.\\n'\n";
     }
 
-    private function windowsScript(string $url, ?string $checksum, ?string $toolsUrl, ?string $toolsChecksum): string
+    private function windowsScript(string $url, ?string $fileSha256, ?string $toolsUrl, ?string $toolsChecksum): string
     {
         $url = str_replace("'", "''", $url);
         $toolsUrl = str_replace("'", "''", (string) $toolsUrl);
-        $checksumVerification = $checksum
-            ? "if ((Get-FileHash .\\deviceguard.apk -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($checksum)."') { throw 'APK checksum mismatch' }\n"
-            : "Write-Warning 'APK checksum verification is not configured by Super Admin.'\n";
+        $configuredHash = strtoupper((string) $fileSha256);
+        $checksumVerification = "\$ConfiguredApkFileSha256 = '{$configuredHash}'\n".
+            "\$apkPath = Join-Path (Get-Location) 'deviceguard.apk'\n".
+            "if ([string]::IsNullOrWhiteSpace(\$ConfiguredApkFileSha256)) { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK file SHA-256 is not configured by Super Admin.\" }\n".
+            "\$actualHash = (Get-FileHash \$apkPath -Algorithm SHA256).Hash.ToUpper()\n".
+            "\$expectedHash = \$ConfiguredApkFileSha256.Trim().ToUpper()\n".
+            "Write-Host \"Expected APK SHA-256: \$expectedHash\"\n".
+            "Write-Host \"Downloaded APK SHA-256: \$actualHash\"\n".
+            "if (\$actualHash -ne \$expectedHash) { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK checksum mismatch. The downloaded APK was removed for safety.\" }\n";
 
         $toolsChecksumVerification = $toolsChecksum
             ? "if ((Get-FileHash \$toolsZip -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($toolsChecksum)."') { throw 'Platform Tools checksum mismatch. Delete the ZIP and stop.' }\n"

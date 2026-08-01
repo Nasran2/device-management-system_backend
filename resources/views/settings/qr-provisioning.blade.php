@@ -4,10 +4,16 @@
     <h1 class="page-title">APK & Provisioning</h1>
     <p class="page-copy">Manage the single approved DeviceGuard APK source and Android provisioning configuration.</p>
 
-    @unless($apkChecksum)
+    @unless($apkFileSha256)
         <section class="mt-6 rounded-2xl border border-amber-300 bg-amber-50 p-5 text-amber-950">
-            <h2 class="font-black">APK checksum verification is not configured by Super Admin.</h2>
-            <p class="mt-1 text-sm">Manual wizard installation remains available from the approved HTTPS URL. Configure the verified SHA-256 value before enabling secure QR provisioning.</p>
+            <h2 class="font-black">APK file SHA-256 is not configured by Super Admin.</h2>
+            <p class="mt-1 text-sm">Windows and macOS setup helpers will stop before installation. Calculate and save the hosted APK file SHA-256 below.</p>
+        </section>
+    @endunless
+    @unless($apkSignatureChecksum)
+        <section class="mt-4 rounded-2xl border border-amber-300 bg-amber-50 p-5 text-amber-950">
+            <h2 class="font-black">Android provisioning signing-certificate checksum is missing.</h2>
+            <p class="mt-1 text-sm">QR Device Owner provisioning remains unavailable until the Base64 or Base64URL certificate checksum is configured.</p>
         </section>
     @endunless
 
@@ -18,15 +24,19 @@
         <section>
             <h2 class="section-title">Approved Android application</h2>
             <div class="form-grid mt-4">
-                <label class="field-label">APK download URL <x-required/>
+                <label class="field-label">APK download URL <x-required/> <x-info text="The HTTPS location of the complete deviceguard.apk file. Setup helpers download only this URL."/>
                     <input id="apk-download-url" class="field-input" type="url" name="provisioning_apk_url" required value="{{ old('provisioning_apk_url', $apkUrl) }}">
                 </label>
-                <label class="field-label">APK version
+                <label class="field-label">APK version <x-info text="A human-readable release value used to identify which hosted APK is approved."/>
                     <input class="field-input" name="provisioning_apk_version" required maxlength="50" value="{{ old('provisioning_apk_version', App\Models\SystemSetting::value('provisioning_apk_version', '')) }}">
                 </label>
-                <label class="field-label">APK SHA-256
-                    <input class="field-input font-mono" name="provisioning_apk_checksum" maxlength="255" value="{{ old('provisioning_apk_checksum', $apkChecksum) }}" placeholder="Optional until the approved checksum is available">
-                    <span class="mt-1 text-xs font-normal text-slate-500">Leave empty only when checksum verification has not yet been configured. The wizard will show a warning without blocking manual installation.</span>
+                <label class="field-label">APK file SHA-256 <x-info text="Exactly 64 hexadecimal characters calculated from every byte of deviceguard.apk. Windows and macOS helpers use this value for Get-FileHash or shasum verification."/>
+                    <input class="field-input font-mono uppercase" name="provisioning_apk_file_sha256" minlength="64" maxlength="64" pattern="[0-9A-Fa-f]{64}" value="{{ old('provisioning_apk_file_sha256', $apkFileSha256) }}" placeholder="64 hexadecimal characters">
+                    <span class="mt-1 text-xs font-normal text-slate-500">This is a whole-file hash. It is never used in the Android provisioning QR payload.</span>
+                </label>
+                <label class="field-label">Android provisioning signing-certificate checksum <x-info text="Base64 or Base64URL SHA-256 checksum of the APK signing certificate. Android Setup Wizard uses it only for PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM."/>
+                    <input class="field-input font-mono" name="provisioning_apk_signature_checksum" maxlength="255" value="{{ old('provisioning_apk_signature_checksum', $apkSignatureChecksum) }}" placeholder="Base64 or Base64URL certificate checksum">
+                    <span class="mt-1 text-xs font-normal text-slate-500">This is not the APK file hash and must never be compared with Get-FileHash or shasum.</span>
                 </label>
                 <label class="field-label">API URL <x-required/>
                     <input class="field-input" type="url" name="provisioning_api_url" required value="{{ old('provisioning_api_url', App\Models\SystemSetting::value('provisioning_api_url', '')) }}">
@@ -104,7 +114,7 @@
         <div class="mt-4 flex flex-wrap gap-3">
             <form method="post" action="{{ route('settings.qr-provisioning.test-apk') }}">@csrf<button class="secondary-button">Test APK URL</button></form>
             <button id="copy-apk-url" type="button" class="secondary-button">Copy APK URL</button>
-            <form method="post" action="{{ route('settings.qr-provisioning.checksum') }}">@csrf<button class="secondary-button">Calculate or verify checksum</button></form>
+            <form method="post" action="{{ route('settings.qr-provisioning.checksum') }}">@csrf<button class="secondary-button">Calculate hosted APK SHA-256</button></form>
             <a class="secondary-button" href="{{ $apkUrl }}" target="_blank" rel="noopener noreferrer" download="deviceguard.apk">Download APK</a>
             <form method="post" action="{{ route('settings.qr-provisioning.validate') }}">@csrf<button class="secondary-button">Validate Configuration</button></form>
         </div>
@@ -122,9 +132,14 @@
     @if(session('apk_checksum_result'))
         @php($checksumResult = session('apk_checksum_result'))
         <section class="mt-6 rounded-2xl border p-5 {{ $checksumResult['passed'] ? 'border-emerald-200 bg-emerald-50' : 'border-rose-200 bg-rose-50' }}">
-            <h2 class="font-black">APK checksum result</h2>
+            <h2 class="font-black">Hosted APK file SHA-256 result</h2>
             <p class="mt-1 text-sm">{{ $checksumResult['message'] }}</p>
-            @if(isset($checksumResult['sha256']))<code class="mt-3 block overflow-x-auto rounded-xl bg-slate-950 p-4 text-xs text-emerald-300">{{ $checksumResult['sha256'] }}</code>@endif
+            @if(isset($checksumResult['expected_sha256']))<p class="mt-3 text-xs font-bold uppercase text-slate-600">Expected APK SHA-256</p><code class="mt-1 block overflow-x-auto rounded-xl bg-slate-950 p-4 text-xs text-emerald-300">{{ $checksumResult['expected_sha256'] }}</code>@endif
+            @if(isset($checksumResult['sha256']))<p class="mt-3 text-xs font-bold uppercase text-slate-600">Downloaded APK SHA-256</p><code class="mt-1 block overflow-x-auto rounded-xl bg-slate-950 p-4 text-xs text-emerald-300">{{ $checksumResult['sha256'] }}</code>@endif
+            @if($checksumResult['download_passed'] ?? false)
+                <form class="mt-4" method="post" action="{{ route('settings.qr-provisioning.checksum') }}">@csrf<input type="hidden" name="save" value="1"><button class="primary-button">Save hosted APK SHA-256</button></form>
+                <p class="mt-2 text-xs text-slate-600">Saving downloads the hosted APK again and calculates the value on the server; it does not trust a browser-submitted hash.</p>
+            @endif
         </section>
     @endif
 

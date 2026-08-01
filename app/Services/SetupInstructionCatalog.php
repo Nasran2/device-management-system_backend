@@ -130,7 +130,7 @@ class SetupInstructionCatalog
         $shell = $isWin ? 'PowerShell' : 'Terminal (zsh)';
         $folder = $isWin ? 'Any PowerShell window after Platform Tools setup' : 'Any Terminal window after Platform Tools setup';
         $apkUrl = $this->apk->url();
-        $apkChecksum = $this->apk->checksum();
+        $apkFileSha256 = $this->apk->fileSha256();
         $toolsSettingPrefix = $isWin ? 'windows' : 'macos';
         $toolsUrl = SystemSetting::value($toolsSettingPrefix.'_platform_tools_url') ?: self::platformToolsUrl($os);
         $toolsChecksum = SystemSetting::value($toolsSettingPrefix.'_platform_tools_checksum');
@@ -251,17 +251,17 @@ class SetupInstructionCatalog
                 [], $shell, $isWin ? "{$adb} shell dumpsys account | Select-String 'Account \\{'" : "{$adb} shell dumpsys account | grep 'Account {' || echo NO_ACCOUNTS", $folder),
 
             $this->step('apk_install', 'Download, verify, and install the configured DeviceGuard APK',
-                $apkChecksum
+                $apkFileSha256
                     ? 'Only the Super Admin-approved HTTPS APK should be installed. Verify its configured SHA-256 before installation.'
-                    : 'Only the Super Admin-approved HTTPS APK should be installed. APK checksum verification is not configured by Super Admin, so installation may continue with the visible warning.',
+                    : 'Only the Super Admin-approved HTTPS APK should be installed. APK file SHA-256 is missing, so installation must stop until Super Admin configures it.',
                 $shell,
                 array_values(array_filter([
                     "Use only the centrally configured APK URL: {$apkUrl}",
                     $isWin ? 'Open PowerShell. The command changes safely to your Downloads folder.' : 'Open Terminal. The command changes safely to ~/Downloads.',
                     'Download deviceguard.apk and verify that the file exists and has a size greater than zero.',
-                    $apkChecksum
+                    $apkFileSha256
                         ? 'Calculate SHA-256 and compare it with the saved expected checksum before installation.'
-                        : 'APK checksum verification is not configured by Super Admin. Continue only with the approved HTTPS URL.',
+                        : 'Stop: APK file SHA-256 is not configured by Super Admin.',
                     'Install with ADB, confirm Success, then verify the exact DeviceGuard package path.',
                 ])),
                 "The download exists, ADB prints:\nPerforming Streamed Install\nSuccess\n\nPackage verification returns:\npackage:/data/app/.../com.twinsofte.deviceguard.../base.apk",
@@ -269,11 +269,11 @@ class SetupInstructionCatalog
                 array_values(array_filter([
                     'Approved HTTPS URL used',
                     'Downloaded deviceguard.apk exists and is not empty',
-                    $apkChecksum ? 'SHA-256 matches the saved expected checksum' : null,
+                    $apkFileSha256 ? 'SHA-256 matches the saved expected APK file hash' : 'Installation stopped until APK file SHA-256 is configured',
                     'ADB installation reports Success',
                     'Exact DeviceGuard package path returned',
                 ])),
-                [], $shell, $this->apkInstallCommand($isWin, $apkUrl, $apkChecksum), $isWin ? 'Windows Downloads folder' : '~/Downloads'),
+                [], $shell, $this->apkInstallCommand($isWin, $apkUrl, $apkFileSha256), $isWin ? 'Windows Downloads folder' : '~/Downloads'),
 
             $this->step('package_receiver', 'Verify the DeviceGuard package and Device Admin receiver',
                 'Device Owner can only be assigned when the exact production package and receiver are installed.',
@@ -384,12 +384,18 @@ class SetupInstructionCatalog
         ];
     }
 
-    private function apkInstallCommand(bool $windows, string $url, ?string $checksum): string
+    private function apkInstallCommand(bool $windows, string $url, ?string $fileSha256): string
     {
         if ($windows) {
-            $checksumCommand = $checksum
-                ? "\n(Get-FileHash .\\deviceguard.apk -Algorithm SHA256).Hash\n# Compare with saved expected SHA-256: {$checksum}\n"
-                : "\n# APK checksum verification is not configured by Super Admin.\n";
+            $configuredHash = strtoupper((string) $fileSha256);
+            $checksumCommand = "\n\$ConfiguredApkFileSha256 = '{$configuredHash}'\n".
+                "\$apkPath = Join-Path (Get-Location) 'deviceguard.apk'\n".
+                "if ([string]::IsNullOrWhiteSpace(\$ConfiguredApkFileSha256)) { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK file SHA-256 is not configured by Super Admin.\" }\n".
+                "\$actualHash = (Get-FileHash \$apkPath -Algorithm SHA256).Hash.ToUpper()\n".
+                "\$expectedHash = \$ConfiguredApkFileSha256.Trim().ToUpper()\n".
+                "Write-Host \"Expected APK SHA-256: \$expectedHash\"\n".
+                "Write-Host \"Downloaded APK SHA-256: \$actualHash\"\n".
+                "if (\$actualHash -ne \$expectedHash) { Remove-Item \$apkPath -Force -ErrorAction SilentlyContinue; throw \"APK checksum mismatch. The downloaded APK was removed for safety.\" }\n";
 
             return "Set-Location (Join-Path \$HOME 'Downloads')\n".
                 "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\n".
@@ -403,9 +409,14 @@ class SetupInstructionCatalog
                 "adb shell pm path {$this->apk->packageName()}";
         }
 
-        $checksumCommand = $checksum
-            ? "\nshasum -a 256 deviceguard.apk\n# Compare with saved expected SHA-256: {$checksum}\n"
-            : "\n# APK checksum verification is not configured by Super Admin.\n";
+        $configuredHash = escapeshellarg(strtoupper((string) $fileSha256));
+        $checksumCommand = "\nCONFIGURED_APK_FILE_SHA256={$configuredHash}\n".
+            "if [ -z \"\$CONFIGURED_APK_FILE_SHA256\" ]; then rm -f deviceguard.apk; echo 'APK file SHA-256 is not configured by Super Admin.' >&2; exit 8; fi\n".
+            "actual_hash=\$(shasum -a 256 deviceguard.apk | awk '{print toupper(\$1)}')\n".
+            "expected_hash=\$(printf '%s' \"\$CONFIGURED_APK_FILE_SHA256\" | tr '[:lower:]' '[:upper:]')\n".
+            "printf 'Expected APK SHA-256: %s\\n' \"\$expected_hash\"\n".
+            "printf 'Downloaded APK SHA-256: %s\\n' \"\$actual_hash\"\n".
+            "if [ \"\$actual_hash\" != \"\$expected_hash\" ]; then rm -f deviceguard.apk; echo 'APK checksum mismatch. The downloaded APK was removed for safety.' >&2; exit 9; fi\n";
 
         return "cd ~/Downloads\n\n".
             "curl -L \\\n".

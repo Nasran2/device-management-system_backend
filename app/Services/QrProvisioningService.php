@@ -19,7 +19,7 @@ class QrProvisioningService
 
     public function configured(): bool
     {
-        return SystemSetting::value('qr_provisioning_enabled', false) && SystemSetting::value('provisioning_api_url') && $this->apk->url() && $this->apk->checksum();
+        return SystemSetting::value('qr_provisioning_enabled', false) && SystemSetting::value('provisioning_api_url') && $this->apk->url() && $this->apk->signatureChecksum();
     }
 
     public function generate(Device $device, int $userId): array
@@ -35,7 +35,7 @@ class QrProvisioningService
 
     public function payload(Device $device, string $plain): array
     {
-        $payload = ['android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME' => self::COMPONENT, 'android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION' => $this->apk->url(), 'android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM' => $this->apk->checksum(), 'android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE' => array_filter(['device_reference' => $device->uuid, 'provisioning_token' => $plain, 'api_url' => rtrim(SystemSetting::value('provisioning_api_url'), '/').'/', 'require_management_pin' => true, 'support_phone' => $device->support_phone ?: SystemSetting::value('provisioning_support_phone'), 'branch_reference' => $device->shop_branch])];
+        $payload = ['android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME' => self::COMPONENT, 'android.app.extra.PROVISIONING_DEVICE_ADMIN_PACKAGE_DOWNLOAD_LOCATION' => $this->apk->url(), 'android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM' => $this->apk->signatureChecksum(), 'android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE' => array_filter(['device_reference' => $device->uuid, 'provisioning_token' => $plain, 'api_url' => rtrim(SystemSetting::value('provisioning_api_url'), '/').'/', 'require_management_pin' => true, 'support_phone' => $device->support_phone ?: SystemSetting::value('provisioning_support_phone'), 'branch_reference' => $device->shop_branch])];
         $ssid = trim((string) SystemSetting::value('provisioning_wifi_ssid', ''));
         if ($ssid !== '') {
             $security = SystemSetting::value('provisioning_wifi_security_type', 'WPA');
@@ -47,7 +47,7 @@ class QrProvisioningService
             }
         }
 
-return $payload;
+        return $payload;
     }
 
     public function png(array $payload): string

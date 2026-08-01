@@ -8,12 +8,14 @@ use App\Models\DeviceActivation;
 use App\Models\DeviceToken;
 use App\Models\SystemSetting;
 use App\Models\User;
+use App\Services\ApkFileIntegrity;
 use App\Services\CommandService;
+use App\Services\DeviceGuardApkSettings;
 use App\Services\FirebaseMessagingService;
 use App\Services\QrProvisioningService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
@@ -72,7 +74,7 @@ class DeviceManagementTest extends TestCase
             'management_pin_hash' => Hash::make('9876'),
             'management_pin_encrypted' => Crypt::encryptString('9876'),
         ]);
-        foreach (['qr_provisioning_enabled' => ['true', 'boolean'], 'provisioning_api_url' => ['https://manage.example.com/api/v1/', 'string'], 'provisioning_apk_url' => ['https://manage.example.com/deviceguard.apk', 'string'], 'provisioning_apk_checksum' => ['checksum', 'string'], 'provisioning_qr_expiry_minutes' => ['30', 'integer']] as $key => [$value, $type]) {
+        foreach (['qr_provisioning_enabled' => ['true', 'boolean'], 'provisioning_api_url' => ['https://manage.example.com/api/v1/', 'string'], 'provisioning_apk_url' => ['https://manage.example.com/deviceguard.apk', 'string'], 'provisioning_apk_file_sha256' => [str_repeat('A', 64), 'string'], 'provisioning_apk_signature_checksum' => ['wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo', 'string'], 'provisioning_qr_expiry_minutes' => ['30', 'integer']] as $key => [$value, $type]) {
             SystemSetting::create(compact('key', 'value', 'type'));
         }
 
@@ -105,25 +107,34 @@ class DeviceManagementTest extends TestCase
 
     public function test_critical_command_dispatches_firebase_immediately_even_with_database_queue(): void
     {
-        config(['queue.default'=>'database']);
-        $admin=$this->user();$device=$this->device($admin,['fcm_token'=>'phone-fcm-token']);
-        $firebase=\Mockery::mock(FirebaseMessagingService::class);
-        $firebase->shouldReceive('send')->once()->with(\Mockery::on(fn($command)=>$command->type==='UNLOCK_DEVICE'&&$command->device->uuid===$device->uuid))->andReturn('projects/test/messages/123');
-        app()->instance(FirebaseMessagingService::class,$firebase);
+        config(['queue.default' => 'database']);
+        $admin = $this->user();
+        $device = $this->device($admin, ['fcm_token' => 'phone-fcm-token']);
+        $firebase = \Mockery::mock(FirebaseMessagingService::class);
+        $firebase->shouldReceive('send')->once()->with(\Mockery::on(fn ($command) => $command->type === 'UNLOCK_DEVICE' && $command->device->uuid === $device->uuid))->andReturn('projects/test/messages/123');
+        app()->instance(FirebaseMessagingService::class, $firebase);
 
-        $command=app(CommandService::class)->create($device,'UNLOCK_DEVICE',[],$admin);
+        $command = app(CommandService::class)->create($device, 'UNLOCK_DEVICE', [], $admin);
 
-        $this->assertSame('dispatched',$command->status);$this->assertNotNull($command->dispatched_at);$this->assertSame('projects/test/messages/123',$command->firebase_message_id);$this->assertDatabaseCount('jobs',0);
+        $this->assertSame('dispatched', $command->status);
+        $this->assertNotNull($command->dispatched_at);
+        $this->assertSame('projects/test/messages/123', $command->firebase_message_id);
+        $this->assertDatabaseCount('jobs', 0);
     }
 
     public function test_command_delivery_and_execution_have_separate_statuses(): void
     {
-        $admin=$this->user();$device=$this->device($admin);$plain='status-token';
-        DeviceToken::create(['device_id'=>$device->id,'token_hash'=>hash('sha256',$plain)]);
-        $command=app(CommandService::class)->create($device,'SYNC_DEVICE',[],$admin);
-        $this->withToken($plain)->postJson("/api/v1/commands/{$command->id}/acknowledge")->assertOk();$this->assertSame('delivered',$command->fresh()->status);
-        $this->withToken($plain)->postJson("/api/v1/commands/{$command->id}/executing")->assertOk();$this->assertSame('executing',$command->fresh()->status);
-        $this->withToken($plain)->postJson("/api/v1/commands/{$command->id}/result",['success'=>true,'message'=>'Done'])->assertOk();$this->assertSame('completed',$command->fresh()->status);
+        $admin = $this->user();
+        $device = $this->device($admin);
+        $plain = 'status-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $plain)]);
+        $command = app(CommandService::class)->create($device, 'SYNC_DEVICE', [], $admin);
+        $this->withToken($plain)->postJson("/api/v1/commands/{$command->id}/acknowledge")->assertOk();
+        $this->assertSame('delivered', $command->fresh()->status);
+        $this->withToken($plain)->postJson("/api/v1/commands/{$command->id}/executing")->assertOk();
+        $this->assertSame('executing', $command->fresh()->status);
+        $this->withToken($plain)->postJson("/api/v1/commands/{$command->id}/result", ['success' => true, 'message' => 'Done'])->assertOk();
+        $this->assertSame('completed', $command->fresh()->status);
     }
 
     public function test_released_device_rejects_commands(): void
@@ -342,157 +353,328 @@ class DeviceManagementTest extends TestCase
 
     public function test_qr_payload_excludes_pin_and_regeneration_revokes_the_previous_token(): void
     {
-        $admin=$this->user();$device=$this->device($admin,['management_pin_hash'=>Hash::make('9876'),'management_pin_encrypted'=>Crypt::encryptString('9876')]);
-        foreach(['qr_provisioning_enabled'=>['true','boolean'],'provisioning_api_url'=>['https://manage.example.com/api/v1','string'],'provisioning_apk_url'=>['https://manage.example.com/deviceguard.apk','string'],'provisioning_apk_checksum'=>['checksum-value','string'],'provisioning_qr_expiry_minutes'=>['30','integer']] as $key=>[$value,$type])SystemSetting::create(compact('key','value','type'));
-        $service=app(QrProvisioningService::class);[$first,$payload]=$service->generate($device,$admin->id);$json=json_encode($payload);
-        $this->assertStringNotContainsString('9876',$json);$this->assertSame(QrProvisioningService::COMPONENT,$payload['android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME']);$this->assertNotEmpty($service->png($payload));
-        [$second]=$service->generate($device,$admin->id);$this->assertSame('revoked',$first->fresh()->status);$this->assertSame('active',$second->fresh()->status);$this->assertDatabaseMissing('device_provisioning_tokens',['token_hash'=>$payload['android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE']['provisioning_token']]);
+        $admin = $this->user();
+        $device = $this->device($admin, ['management_pin_hash' => Hash::make('9876'), 'management_pin_encrypted' => Crypt::encryptString('9876')]);
+        foreach (['qr_provisioning_enabled' => ['true', 'boolean'], 'provisioning_api_url' => ['https://manage.example.com/api/v1', 'string'], 'provisioning_apk_url' => ['https://manage.example.com/deviceguard.apk', 'string'], 'provisioning_apk_file_sha256' => [str_repeat('A', 64), 'string'], 'provisioning_apk_signature_checksum' => ['wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo', 'string'], 'provisioning_qr_expiry_minutes' => ['30', 'integer']] as $key => [$value,$type]) {
+            SystemSetting::create(compact('key', 'value', 'type'));
+        }
+        $service = app(QrProvisioningService::class);
+        [$first,$payload] = $service->generate($device, $admin->id);
+        $extras = $payload['android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE'];
+        $this->assertArrayNotHasKey('management_pin', $extras);
+        $this->assertArrayNotHasKey('management_pin_hash', $extras);
+        $this->assertArrayNotHasKey('management_pin_encrypted', $extras);
+        $this->assertSame(QrProvisioningService::COMPONENT, $payload['android.app.extra.PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME']);
+        $this->assertNotEmpty($service->png($payload));
+        [$second] = $service->generate($device, $admin->id);
+        $this->assertSame('revoked', $first->fresh()->status);
+        $this->assertSame('active', $second->fresh()->status);
+        $this->assertDatabaseMissing('device_provisioning_tokens', ['token_hash' => $payload['android.app.extra.PROVISIONING_ADMIN_EXTRAS_BUNDLE']['provisioning_token']]);
     }
 
     public function test_provisioning_token_is_single_use_and_returns_device_credentials(): void
     {
-        $admin=$this->user();$device=$this->device($admin,['management_pin_hash'=>Hash::make('9876'),'management_pin_encrypted'=>Crypt::encryptString('9876')]);$plain=bin2hex(random_bytes(32));$token=$device->provisioningTokens()->create(['token_hash'=>hash('sha256',$plain),'status'=>'active','expires_at'=>now()->addMinutes(30),'created_by'=>$admin->id]);
-        $payload=['device_reference'=>$device->uuid,'provisioning_token'=>$plain,'management_pin'=>'9876','device_uuid'=>'5c371414-52aa-44a1-9ad7-ca4cbf867c94','android_version'=>'16','app_version'=>'1.0.0','manufacturer'=>'Google','model'=>'Pixel','is_device_owner'=>true,'is_admin_active'=>true];
-        $this->postJson('/api/v1/devices/provision',$payload)->assertOk()->assertJsonStructure(['data'=>['device_token','command_verification_key']]);$this->assertSame('completed',$token->fresh()->status);$this->assertTrue($device->fresh()->is_device_owner);
-        $this->postJson('/api/v1/devices/provision',$payload)->assertStatus(410)->assertJsonPath('error_code','TOKEN_INVALID');
+        $admin = $this->user();
+        $device = $this->device($admin, ['management_pin_hash' => Hash::make('9876'), 'management_pin_encrypted' => Crypt::encryptString('9876')]);
+        $plain = bin2hex(random_bytes(32));
+        $token = $device->provisioningTokens()->create(['token_hash' => hash('sha256', $plain), 'status' => 'active', 'expires_at' => now()->addMinutes(30), 'created_by' => $admin->id]);
+        $payload = ['device_reference' => $device->uuid, 'provisioning_token' => $plain, 'management_pin' => '9876', 'device_uuid' => '5c371414-52aa-44a1-9ad7-ca4cbf867c94', 'android_version' => '16', 'app_version' => '1.0.0', 'manufacturer' => 'Google', 'model' => 'Pixel', 'is_device_owner' => true, 'is_admin_active' => true];
+        $this->postJson('/api/v1/devices/provision', $payload)->assertOk()->assertJsonStructure(['data' => ['device_token', 'command_verification_key']]);
+        $this->assertSame('completed', $token->fresh()->status);
+        $this->assertTrue($device->fresh()->is_device_owner);
+        $this->postJson('/api/v1/devices/provision', $payload)->assertStatus(410)->assertJsonPath('error_code', 'TOKEN_INVALID');
     }
 
     public function test_admin_can_archive_only_own_device_but_can_never_permanently_delete(): void
     {
-        $owner=$this->user();$other=$this->user();$device=$this->device($owner,['status'=>'pending_activation']);
+        $owner = $this->user();
+        $other = $this->user();
+        $device = $this->device($owner, ['status' => 'pending_activation']);
         $this->actingAs($owner)->get(route('devices.index'))->assertOk()->assertDontSee('Permanently Delete');
         $this->actingAs($this->user('super_admin'))->get(route('devices.index'))->assertOk()->assertSee('Permanently Delete');
-        $this->actingAs($other)->post(route('devices.archive',$device),['password'=>'Password@123'])->assertForbidden();
-        $this->actingAs($owner)->delete(route('devices.destroy',$device->id),['password'=>'Password@123','reason'=>'Not allowed','confirmation'=>'DELETE','confirmed'=>'1'])->assertForbidden();
-        $this->actingAs($owner)->post(route('devices.archive',$device),['password'=>'Password@123'])->assertRedirect(route('devices.index'));
-        $this->assertSoftDeleted('devices',['id'=>$device->id]);$this->assertDatabaseHas('audit_logs',['device_id'=>$device->id,'action'=>'DEVICE_ARCHIVED']);
+        $this->actingAs($other)->post(route('devices.archive', $device), ['password' => 'Password@123'])->assertForbidden();
+        $this->actingAs($owner)->delete(route('devices.destroy', $device->id), ['password' => 'Password@123', 'reason' => 'Not allowed', 'confirmation' => 'DELETE', 'confirmed' => '1'])->assertForbidden();
+        $this->actingAs($owner)->post(route('devices.archive', $device), ['password' => 'Password@123'])->assertRedirect(route('devices.index'));
+        $this->assertSoftDeleted('devices', ['id' => $device->id]);
+        $this->assertDatabaseHas('audit_logs', ['device_id' => $device->id, 'action' => 'DEVICE_ARCHIVED']);
     }
 
     public function test_archived_device_is_hidden_listed_for_super_admin_and_can_be_restored(): void
     {
-        $admin=$this->user();$super=$this->user('super_admin');$device=$this->device($admin,['status'=>'pending_activation']);$device->update(['archived_by'=>$admin->id,'status_before_archive'=>'pending_activation']);$device->delete();
+        $admin = $this->user();
+        $super = $this->user('super_admin');
+        $device = $this->device($admin, ['status' => 'pending_activation']);
+        $device->update(['archived_by' => $admin->id, 'status_before_archive' => 'pending_activation']);
+        $device->delete();
         $this->actingAs($admin)->get(route('devices.index'))->assertDontSee($device->uuid);
         $this->actingAs($admin)->get(route('devices.archived'))->assertForbidden();
         $this->actingAs($super)->get(route('devices.archived'))->assertOk()->assertSee($device->brand);
-        $this->actingAs($super)->post(route('devices.restore',$device->id),['password'=>'Password@123'])->assertRedirect(route('devices.archived'));
-        $this->assertNotSoftDeleted('devices',['id'=>$device->id]);$this->assertSame('pending_activation',$device->fresh()->status);
+        $this->actingAs($super)->post(route('devices.restore', $device->id), ['password' => 'Password@123'])->assertRedirect(route('devices.archived'));
+        $this->assertNotSoftDeleted('devices', ['id' => $device->id]);
+        $this->assertSame('pending_activation', $device->fresh()->status);
     }
 
     public function test_super_admin_password_and_safe_status_are_required_for_permanent_delete(): void
     {
-        $super=$this->user('super_admin');$pending=$this->device($this->user(),['status'=>'pending_activation']);
-        $payload=['reason'=>'Duplicate record','confirmation'=>'DELETE','confirmed'=>'1'];
-        $this->actingAs($super)->delete(route('devices.destroy',$pending->id),$payload)->assertSessionHasErrors('password');
-        $this->actingAs($super)->delete(route('devices.destroy',$pending->id),$payload+['password'=>'wrong'])->assertSessionHasErrors('password');
-        $this->actingAs($super)->delete(route('devices.destroy',$pending->id),$payload+['password'=>'Password@123'])->assertRedirect(route('devices.index'));
-        $this->assertDatabaseMissing('devices',['id'=>$pending->id]);
-        $active=$this->device($this->user(),['status'=>'active_unlocked','device_uuid'=>'5c371414-52aa-44a1-9ad7-ca4cbf867c94','is_device_owner'=>true]);
-        $this->actingAs($super)->delete(route('devices.destroy',$active->id),$payload+['password'=>'Password@123'])->assertSessionHasErrors('device');$this->assertDatabaseHas('devices',['id'=>$active->id]);
+        $super = $this->user('super_admin');
+        $pending = $this->device($this->user(), ['status' => 'pending_activation']);
+        $payload = ['reason' => 'Duplicate record', 'confirmation' => 'DELETE', 'confirmed' => '1'];
+        $this->actingAs($super)->delete(route('devices.destroy', $pending->id), $payload)->assertSessionHasErrors('password');
+        $this->actingAs($super)->delete(route('devices.destroy', $pending->id), $payload + ['password' => 'wrong'])->assertSessionHasErrors('password');
+        $this->actingAs($super)->delete(route('devices.destroy', $pending->id), $payload + ['password' => 'Password@123'])->assertRedirect(route('devices.index'));
+        $this->assertDatabaseMissing('devices', ['id' => $pending->id]);
+        $active = $this->device($this->user(), ['status' => 'active_unlocked', 'device_uuid' => '5c371414-52aa-44a1-9ad7-ca4cbf867c94', 'is_device_owner' => true]);
+        $this->actingAs($super)->delete(route('devices.destroy', $active->id), $payload + ['password' => 'Password@123'])->assertSessionHasErrors('device');
+        $this->assertDatabaseHas('devices', ['id' => $active->id]);
     }
 
     public function test_force_delete_requires_extra_confirmation_and_cleans_relations_while_retaining_audit(): void
     {
-        $owner=$this->user();$super=$this->user('super_admin');$device=$this->device($owner,['status'=>'active_unlocked','is_device_owner'=>true]);$device->tokens()->create(['token_hash'=>hash('sha256','cleanup-token')]);$device->activations()->create(['code_hash'=>Hash::make('CODE-TEST'),'expires_at'=>now()->addHour()]);
-        $payload=['password'=>'Password@123','reason'=>'Authorized server cleanup','confirmation'=>'DELETE','confirmed'=>'1'];
-        $this->actingAs($super)->delete(route('devices.force-delete',$device->id),$payload)->assertSessionHasErrors('force_confirmed');
-        $this->actingAs($super)->delete(route('devices.force-delete',$device->id),$payload+['force_confirmed'=>'1'])->assertRedirect(route('devices.index'));
-        $this->assertDatabaseMissing('devices',['id'=>$device->id]);$this->assertDatabaseMissing('device_tokens',['device_id'=>$device->id]);$this->assertDatabaseMissing('device_activations',['device_id'=>$device->id]);$this->assertDatabaseHas('audit_logs',['device_id'=>null,'action'=>'DEVICE_FORCE_DELETED']);
+        $owner = $this->user();
+        $super = $this->user('super_admin');
+        $device = $this->device($owner, ['status' => 'active_unlocked', 'is_device_owner' => true]);
+        $device->tokens()->create(['token_hash' => hash('sha256', 'cleanup-token')]);
+        $device->activations()->create(['code_hash' => Hash::make('CODE-TEST'), 'expires_at' => now()->addHour()]);
+        $payload = ['password' => 'Password@123', 'reason' => 'Authorized server cleanup', 'confirmation' => 'DELETE', 'confirmed' => '1'];
+        $this->actingAs($super)->delete(route('devices.force-delete', $device->id), $payload)->assertSessionHasErrors('force_confirmed');
+        $this->actingAs($super)->delete(route('devices.force-delete', $device->id), $payload + ['force_confirmed' => '1'])->assertRedirect(route('devices.index'));
+        $this->assertDatabaseMissing('devices', ['id' => $device->id]);
+        $this->assertDatabaseMissing('device_tokens', ['device_id' => $device->id]);
+        $this->assertDatabaseMissing('device_activations', ['device_id' => $device->id]);
+        $this->assertDatabaseHas('audit_logs', ['device_id' => null, 'action' => 'DEVICE_FORCE_DELETED']);
     }
 
-    private function qrSettingsPayload(array $overrides=[]): array
+    private function qrSettingsPayload(array $overrides = []): array
     {
-        return array_merge(['provisioning_api_url'=>'https://manage.example.com/api/v1/','provisioning_apk_url'=>'https://manage.example.com/deviceguard.apk','provisioning_apk_version'=>'1.0.0','provisioning_apk_checksum'=>'checksum','provisioning_qr_expiry_minutes'=>30,'provisioning_support_phone'=>'+94110000000'], $overrides);
+        return array_merge(['provisioning_api_url' => 'https://manage.example.com/api/v1/', 'provisioning_apk_url' => 'https://manage.example.com/deviceguard.apk', 'provisioning_apk_version' => '1.0.0', 'provisioning_apk_file_sha256' => str_repeat('A', 64), 'provisioning_apk_signature_checksum' => 'wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo', 'provisioning_qr_expiry_minutes' => 30, 'provisioning_support_phone' => '+94110000000'], $overrides);
     }
 
-    private function saveQrValidationSettings(array $overrides=[]): void
+    private function saveQrValidationSettings(array $overrides = []): void
     {
-        $settings=array_merge(['provisioning_api_url'=>['https://manage.example.com/api/v1/','string'],'provisioning_apk_url'=>['https://manage.example.com/deviceguard-1.0.2.apk','string'],'provisioning_apk_version'=>['1.0.2','string'],'provisioning_apk_checksum'=>['checksum','string'],'qr_provisioning_enabled'=>['true','boolean']],$overrides);
-        foreach($settings as $key=>[$value,$type]) SystemSetting::updateOrCreate(['key'=>$key],['value'=>$value,'type'=>$type]);
+        $settings = array_merge(['provisioning_api_url' => ['https://manage.example.com/api/v1/', 'string'], 'provisioning_apk_url' => ['https://manage.example.com/deviceguard-1.0.2.apk', 'string'], 'provisioning_apk_version' => ['1.0.2', 'string'], 'provisioning_apk_file_sha256' => [str_repeat('A', 64), 'string'], 'provisioning_apk_signature_checksum' => ['wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo', 'string'], 'qr_provisioning_enabled' => ['true', 'boolean']], $overrides);
+        foreach ($settings as $key => [$value,$type]) {
+            SystemSetting::updateOrCreate(['key' => $key], ['value' => $value, 'type' => $type]);
+        }
     }
 
     public function test_qr_validation_reads_saved_settings_and_checks_health_and_apk(): void
     {
-        $super=$this->user('super_admin');$this->saveQrValidationSettings();
+        $super = $this->user('super_admin');
+        $this->saveQrValidationSettings();
         Http::fake([
-            'https://manage.example.com/api/v1/health'=>Http::response(['success'=>true,'message'=>'DeviceGuard API is running'],200),
-            'https://manage.example.com/deviceguard-1.0.2.apk'=>Http::response('',200,['Content-Type'=>'application/vnd.android.package-archive','Content-Length'=>'13000000']),
+            'https://manage.example.com/api/v1/health' => Http::response(['success' => true, 'message' => 'DeviceGuard API is running'], 200),
+            'https://manage.example.com/deviceguard-1.0.2.apk' => Http::response('', 200, ['Content-Type' => 'application/vnd.android.package-archive', 'Content-Length' => '13000000']),
         ]);
 
-        $response=$this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
-        $response->assertRedirect(route('settings.qr-provisioning'))->assertSessionHasNoErrors()->assertSessionHas('success')->assertSessionHas('configuration_validation.passed',true);
-        Http::assertSent(fn($request)=>$request->url()==='https://manage.example.com/api/v1/health');
-        Http::assertSent(fn($request)=>$request->method()==='HEAD'&&$request->url()==='https://manage.example.com/deviceguard-1.0.2.apk');
+        $response = $this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
+        $response->assertRedirect(route('settings.qr-provisioning'))->assertSessionHasNoErrors()->assertSessionHas('success')->assertSessionHas('configuration_validation.passed', true);
+        Http::assertSent(fn ($request) => $request->url() === 'https://manage.example.com/api/v1/health');
+        Http::assertSent(fn ($request) => $request->method() === 'HEAD' && $request->url() === 'https://manage.example.com/deviceguard-1.0.2.apk');
     }
 
     public function test_qr_validation_redirects_with_readable_saved_setting_errors_instead_of_422(): void
     {
-        $super=$this->user('super_admin');$this->saveQrValidationSettings(['provisioning_apk_checksum'=>['','string'],'qr_provisioning_enabled'=>['false','boolean']]);
-        $response=$this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
-        $response->assertRedirect(route('settings.qr-provisioning'))->assertSessionHasErrors('configuration')->assertSessionHas('configuration_validation.passed',false);
-        $result=$response->getSession()->get('configuration_validation');
-        $this->assertContains('Signing certificate checksum is missing.',$result['errors']);$this->assertContains('QR provisioning is disabled.',$result['errors']);
+        $super = $this->user('super_admin');
+        $this->saveQrValidationSettings(['provisioning_apk_signature_checksum' => ['', 'string'], 'qr_provisioning_enabled' => ['false', 'boolean']]);
+        $response = $this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
+        $response->assertRedirect(route('settings.qr-provisioning'))->assertSessionHasErrors('configuration')->assertSessionHas('configuration_validation.passed', false);
+        $result = $response->getSession()->get('configuration_validation');
+        $this->assertContains('Signing certificate checksum is missing.', $result['errors']);
+        $this->assertContains('QR provisioning is disabled.', $result['errors']);
         Http::assertNothingSent();
     }
 
     public function test_qr_validation_rejects_non_https_urls_without_422(): void
     {
-        $super=$this->user('super_admin');$this->saveQrValidationSettings(['provisioning_api_url'=>['http://manage.example.com/api/v1/','string'],'provisioning_apk_url'=>['http://manage.example.com/app.apk','string']]);
-        $response=$this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
+        $super = $this->user('super_admin');
+        $this->saveQrValidationSettings(['provisioning_api_url' => ['http://manage.example.com/api/v1/', 'string'], 'provisioning_apk_url' => ['http://manage.example.com/app.apk', 'string']]);
+        $response = $this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
         $response->assertRedirect(route('settings.qr-provisioning'))->assertSessionHasErrors('configuration');
-        $errors=$response->getSession()->get('configuration_validation')['errors'];
-        $this->assertContains('The production API URL must use HTTPS.',$errors);$this->assertContains('The APK download URL must use HTTPS.',$errors);
+        $errors = $response->getSession()->get('configuration_validation')['errors'];
+        $this->assertContains('The production API URL must use HTTPS.', $errors);
+        $this->assertContains('The APK download URL must use HTTPS.', $errors);
     }
 
     public function test_qr_validation_reports_invalid_remote_responses(): void
     {
-        $super=$this->user('super_admin');$this->saveQrValidationSettings();
+        $super = $this->user('super_admin');
+        $this->saveQrValidationSettings();
         Http::fake([
-            'https://manage.example.com/api/v1/health'=>Http::response(['success'=>false],200),
-            'https://manage.example.com/deviceguard-1.0.2.apk'=>Http::response('x',200,['Content-Type'=>'text/html','Content-Length'=>'1']),
+            'https://manage.example.com/api/v1/health' => Http::response(['success' => false], 200),
+            'https://manage.example.com/deviceguard-1.0.2.apk' => Http::response('x', 200, ['Content-Type' => 'text/html', 'Content-Length' => '1']),
         ]);
-        $response=$this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
+        $response = $this->actingAs($super)->post(route('settings.qr-provisioning.validate'));
         $response->assertRedirect(route('settings.qr-provisioning'))->assertSessionHasErrors('configuration');
-        $errors=$response->getSession()->get('configuration_validation')['errors'];
-        $this->assertContains('API returned an invalid response.',$errors);$this->assertContains('APK content type is incorrect.',$errors);
+        $errors = $response->getSession()->get('configuration_validation')['errors'];
+        $this->assertContains('API returned an invalid response.', $errors);
+        $this->assertContains('APK content type is incorrect.', $errors);
     }
 
     public function test_qr_settings_page_has_csrf_protected_validation_form_and_displays_results(): void
     {
-        $super=$this->user('super_admin');
-        $response=$this->actingAs($super)->withSession(['configuration_validation'=>['passed'=>false,'checks'=>['API health endpoint'=>['passed'=>false,'message'=>'Failed.']],'errors'=>['API health endpoint is unreachable.']]])->get(route('settings.qr-provisioning'));
-        $response->assertOk()->assertSee('action="'.route('settings.qr-provisioning.validate').'"',false)->assertSee('name="_token"',false)->assertSee('Configuration validation needs attention')->assertSee('API health endpoint is unreachable.');
+        $super = $this->user('super_admin');
+        $response = $this->actingAs($super)->withSession(['configuration_validation' => ['passed' => false, 'checks' => ['API health endpoint' => ['passed' => false, 'message' => 'Failed.']], 'errors' => ['API health endpoint is unreachable.']]])->get(route('settings.qr-provisioning'));
+        $response->assertOk()->assertSee('action="'.route('settings.qr-provisioning.validate').'"', false)->assertSee('name="_token"', false)->assertSee('Configuration validation needs attention')->assertSee('API health endpoint is unreachable.');
     }
 
     public function test_qr_settings_save_without_wifi_and_omit_wifi_extras(): void
     {
-        $super=$this->user('super_admin');
-        $this->actingAs($super)->put(route('settings.qr-provisioning.update'),$this->qrSettingsPayload())->assertSessionHasNoErrors()->assertSessionHas('success');
-        $this->assertDatabaseMissing('system_settings',['key'=>'provisioning_wifi_ssid']);
-        $device=$this->device($super);$payload=app(QrProvisioningService::class)->payload($device,'one-time-token');$json=json_encode($payload);
-        $this->assertStringNotContainsString('PROVISIONING_WIFI_SSID',$json);$this->assertStringNotContainsString('PROVISIONING_WIFI_PASSWORD',$json);$this->assertStringNotContainsString('PROVISIONING_WIFI_SECURITY_TYPE',$json);
+        $super = $this->user('super_admin');
+        $this->actingAs($super)->put(route('settings.qr-provisioning.update'), $this->qrSettingsPayload())->assertSessionHasNoErrors()->assertSessionHas('success');
+        $this->assertDatabaseMissing('system_settings', ['key' => 'provisioning_wifi_ssid']);
+        $device = $this->device($super);
+        $payload = app(QrProvisioningService::class)->payload($device, 'one-time-token');
+        $json = json_encode($payload);
+        $this->assertStringNotContainsString('PROVISIONING_WIFI_SSID', $json);
+        $this->assertStringNotContainsString('PROVISIONING_WIFI_PASSWORD', $json);
+        $this->assertStringNotContainsString('PROVISIONING_WIFI_SECURITY_TYPE', $json);
     }
 
     public function test_wpa_wifi_requires_password_and_stores_it_encrypted(): void
     {
-        $super=$this->user('super_admin');$base=$this->qrSettingsPayload(['wifi_ssid'=>'Shop WiFi','wifi_security_type'=>'WPA']);
-        $this->actingAs($super)->put(route('settings.qr-provisioning.update'),$base)->assertSessionHasErrors('wifi_password');
-        $this->actingAs($super)->put(route('settings.qr-provisioning.update'),$base+['wifi_password'=>'SecretPass123'])->assertSessionHasNoErrors();
-        $stored=SystemSetting::where('key','provisioning_wifi_password_encrypted')->value('value');$this->assertNotSame('SecretPass123',$stored);$this->assertSame('SecretPass123',Crypt::decryptString($stored));
-        $device=$this->device($super);$payload=app(QrProvisioningService::class)->payload($device,'token');$this->assertSame('Shop WiFi',$payload['android.app.extra.PROVISIONING_WIFI_SSID']);$this->assertSame('WPA',$payload['android.app.extra.PROVISIONING_WIFI_SECURITY_TYPE']);$this->assertSame('SecretPass123',$payload['android.app.extra.PROVISIONING_WIFI_PASSWORD']);
+        $super = $this->user('super_admin');
+        $base = $this->qrSettingsPayload(['wifi_ssid' => 'Shop WiFi', 'wifi_security_type' => 'WPA']);
+        $this->actingAs($super)->put(route('settings.qr-provisioning.update'), $base)->assertSessionHasErrors('wifi_password');
+        $this->actingAs($super)->put(route('settings.qr-provisioning.update'), $base + ['wifi_password' => 'SecretPass123'])->assertSessionHasNoErrors();
+        $stored = SystemSetting::where('key', 'provisioning_wifi_password_encrypted')->value('value');
+        $this->assertNotSame('SecretPass123', $stored);
+        $this->assertSame('SecretPass123', Crypt::decryptString($stored));
+        $device = $this->device($super);
+        $payload = app(QrProvisioningService::class)->payload($device, 'token');
+        $this->assertSame('Shop WiFi', $payload['android.app.extra.PROVISIONING_WIFI_SSID']);
+        $this->assertSame('WPA', $payload['android.app.extra.PROVISIONING_WIFI_SECURITY_TYPE']);
+        $this->assertSame('SecretPass123', $payload['android.app.extra.PROVISIONING_WIFI_PASSWORD']);
     }
 
     public function test_open_wifi_saves_without_password(): void
     {
-        $super=$this->user('super_admin');
-        $this->actingAs($super)->put(route('settings.qr-provisioning.update'),$this->qrSettingsPayload(['wifi_ssid'=>'Guest Network','wifi_security_type'=>'NONE']))->assertSessionHasNoErrors();
-        $this->assertDatabaseHas('system_settings',['key'=>'provisioning_wifi_ssid','value'=>'Guest Network']);$this->assertDatabaseMissing('system_settings',['key'=>'provisioning_wifi_password_encrypted']);
+        $super = $this->user('super_admin');
+        $this->actingAs($super)->put(route('settings.qr-provisioning.update'), $this->qrSettingsPayload(['wifi_ssid' => 'Guest Network', 'wifi_security_type' => 'NONE']))->assertSessionHasNoErrors();
+        $this->assertDatabaseHas('system_settings', ['key' => 'provisioning_wifi_ssid', 'value' => 'Guest Network']);
+        $this->assertDatabaseMissing('system_settings', ['key' => 'provisioning_wifi_password_encrypted']);
     }
 
     public function test_wifi_fields_are_optional_and_saved_password_is_not_exposed_in_html(): void
     {
-        $super=$this->user('super_admin');SystemSetting::create(['key'=>'provisioning_wifi_ssid','value'=>'Shop WiFi','type'=>'string']);SystemSetting::create(['key'=>'provisioning_wifi_password_encrypted','value'=>Crypt::encryptString('NeverExposeMe'),'type'=>'encrypted']);
-        $html=$this->actingAs($super)->get(route('settings.qr-provisioning'))->assertOk()->getContent();
-        preg_match('/<input[^>]+name="wifi_ssid"[^>]*>/',$html,$ssid);preg_match('/<input[^>]+name="wifi_password"[^>]*>/',$html,$password);
-        $this->assertNotEmpty($ssid);$this->assertNotEmpty($password);$this->assertStringNotContainsString('required',$ssid[0]);$this->assertStringNotContainsString('aria-required',$ssid[0]);$this->assertStringNotContainsString('required',$password[0]);$this->assertStringNotContainsString('NeverExposeMe',$html);$this->assertStringNotContainsString(SystemSetting::value('provisioning_wifi_password_encrypted'),$html);
+        $super = $this->user('super_admin');
+        SystemSetting::create(['key' => 'provisioning_wifi_ssid', 'value' => 'Shop WiFi', 'type' => 'string']);
+        SystemSetting::create(['key' => 'provisioning_wifi_password_encrypted', 'value' => Crypt::encryptString('NeverExposeMe'), 'type' => 'encrypted']);
+        $html = $this->actingAs($super)->get(route('settings.qr-provisioning'))->assertOk()->getContent();
+        preg_match('/<input[^>]+name="wifi_ssid"[^>]*>/', $html, $ssid);
+        preg_match('/<input[^>]+name="wifi_password"[^>]*>/', $html, $password);
+        $this->assertNotEmpty($ssid);
+        $this->assertNotEmpty($password);
+        $this->assertStringNotContainsString('required', $ssid[0]);
+        $this->assertStringNotContainsString('aria-required', $ssid[0]);
+        $this->assertStringNotContainsString('required', $password[0]);
+        $this->assertStringNotContainsString('NeverExposeMe', $html);
+        $this->assertStringNotContainsString(SystemSetting::value('provisioning_wifi_password_encrypted'), $html);
+    }
+
+    public function test_apk_file_hash_and_signing_checksum_are_saved_and_used_separately(): void
+    {
+        $super = $this->user('super_admin');
+        $fileHash = hash('sha256', 'approved-apk');
+        $signatureChecksum = 'wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo';
+
+        $this->actingAs($super)->put(route('settings.qr-provisioning.update'), $this->qrSettingsPayload([
+            'provisioning_apk_file_sha256' => $fileHash,
+            'provisioning_apk_signature_checksum' => $signatureChecksum,
+        ]))->assertSessionHasNoErrors();
+
+        $this->assertDatabaseHas('system_settings', ['key' => DeviceGuardApkSettings::SETTING_FILE_SHA256, 'value' => $fileHash]);
+        $this->assertDatabaseHas('system_settings', ['key' => DeviceGuardApkSettings::SETTING_SIGNATURE_CHECKSUM, 'value' => $signatureChecksum]);
+        $this->assertDatabaseMissing('system_settings', ['key' => DeviceGuardApkSettings::LEGACY_SETTING_CHECKSUM]);
+
+        $device = $this->device($super);
+        $payload = app(QrProvisioningService::class)->payload($device, 'one-time-token');
+        $this->assertSame($signatureChecksum, $payload['android.app.extra.PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM']);
+        $this->assertStringNotContainsString(strtoupper($fileHash), json_encode($payload));
+        $this->assertSame(strtoupper($fileHash), app(DeviceGuardApkSettings::class)->fileSha256());
+    }
+
+    public function test_legacy_certificate_checksum_is_never_treated_as_an_apk_file_hash(): void
+    {
+        $legacy = 'wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo';
+        SystemSetting::create(['key' => DeviceGuardApkSettings::LEGACY_SETTING_CHECKSUM, 'value' => $legacy, 'type' => 'string']);
+
+        $settings = app(DeviceGuardApkSettings::class);
+        $this->assertSame($legacy, $settings->signatureChecksum());
+        $this->assertNull($settings->fileSha256());
+    }
+
+    public function test_apk_checksum_fields_reject_the_wrong_formats(): void
+    {
+        $super = $this->user('super_admin');
+        $response = $this->actingAs($super)->put(route('settings.qr-provisioning.update'), $this->qrSettingsPayload([
+            'provisioning_apk_file_sha256' => 'wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo',
+            'provisioning_apk_signature_checksum' => '***not-base64***',
+        ]));
+
+        $response->assertSessionHasErrors([
+            'provisioning_apk_file_sha256',
+            'provisioning_apk_signature_checksum',
+        ]);
+    }
+
+    public function test_apk_file_integrity_accepts_the_approved_file_and_deletes_a_modified_file(): void
+    {
+        $integrity = app(ApkFileIntegrity::class);
+        $approved = tempnam(sys_get_temp_dir(), 'approved-apk-');
+        $modified = tempnam(sys_get_temp_dir(), 'modified-apk-');
+        $this->assertNotFalse($approved);
+        $this->assertNotFalse($modified);
+        file_put_contents($approved, 'approved-content');
+        file_put_contents($modified, 'modified-content');
+        $expected = hash('sha256', 'approved-content');
+
+        $passed = $integrity->verify($approved, $expected, true);
+        $failed = $integrity->verify($modified, $expected, true);
+
+        $this->assertTrue($passed['passed']);
+        $this->assertFileExists($approved);
+        $this->assertFalse($failed['passed']);
+        $this->assertTrue($failed['removed']);
+        $this->assertFileDoesNotExist($modified);
+        @unlink($approved);
+    }
+
+    public function test_super_admin_can_calculate_and_save_the_hosted_apk_file_sha256(): void
+    {
+        $super = $this->user('super_admin');
+        $body = 'PK-hosted-deviceguard-apk';
+        $expected = strtoupper(hash('sha256', $body));
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_URL, 'value' => 'https://phone.twinsofte.com/downloads/deviceguard.apk', 'type' => 'string']);
+        Http::fake([
+            'https://phone.twinsofte.com/downloads/deviceguard.apk' => Http::sequence()
+                ->push($body, 200, ['Content-Type' => 'application/vnd.android.package-archive'])
+                ->push($body, 200, ['Content-Type' => 'application/vnd.android.package-archive']),
+        ]);
+
+        $calculated = $this->actingAs($super)->post(route('settings.qr-provisioning.checksum'));
+        $calculated->assertSessionHas('apk_checksum_result.sha256', $expected);
+        $this->assertDatabaseMissing('system_settings', ['key' => DeviceGuardApkSettings::SETTING_FILE_SHA256]);
+
+        $saved = $this->actingAs($super)->post(route('settings.qr-provisioning.checksum'), ['save' => 1]);
+        $saved->assertSessionHas('apk_checksum_result.passed', true);
+        $this->assertDatabaseHas('system_settings', ['key' => DeviceGuardApkSettings::SETTING_FILE_SHA256, 'value' => $expected]);
+    }
+
+    public function test_hosted_apk_mismatch_reports_both_hashes_and_removes_the_download(): void
+    {
+        $super = $this->user('super_admin');
+        $expected = strtoupper(hash('sha256', 'approved-content'));
+        $actual = strtoupper(hash('sha256', 'modified-content'));
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_URL, 'value' => 'https://phone.twinsofte.com/downloads/deviceguard.apk', 'type' => 'string']);
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_FILE_SHA256, 'value' => $expected, 'type' => 'string']);
+        Http::fake([
+            'https://phone.twinsofte.com/downloads/deviceguard.apk' => Http::response('modified-content', 200, ['Content-Type' => 'application/vnd.android.package-archive']),
+        ]);
+
+        $response = $this->actingAs($super)->post(route('settings.qr-provisioning.checksum'));
+        $response->assertSessionHas('apk_checksum_result.passed', false)
+            ->assertSessionHas('apk_checksum_result.expected_sha256', $expected)
+            ->assertSessionHas('apk_checksum_result.sha256', $actual)
+            ->assertSessionHas('apk_checksum_result.mismatched_file_removed', true);
     }
 }

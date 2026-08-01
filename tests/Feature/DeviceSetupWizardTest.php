@@ -9,6 +9,7 @@ use App\Models\DeviceSetupSession;
 use App\Models\Shop;
 use App\Models\SystemSetting;
 use App\Models\User;
+use App\Services\DeviceGuardApkSettings;
 use App\Services\SetupInstructionCatalog;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -145,6 +146,10 @@ class DeviceSetupWizardTest extends TestCase
 
     public function test_wizard_uses_central_production_apk_url_and_exact_platform_commands(): void
     {
+        $fileHash = str_repeat('A', 64);
+        $signatureChecksum = 'wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo';
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_FILE_SHA256, 'value' => $fileHash, 'type' => 'string']);
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_SIGNATURE_CHECKSUM, 'value' => $signatureChecksum, 'type' => 'string']);
         $catalog = app(SetupInstructionCatalog::class);
         $windows = $catalog->for('windows', 'samsung')->firstWhere('step_key', 'apk_install');
         $macos = $catalog->for('macos', 'samsung')->firstWhere('step_key', 'apk_install');
@@ -159,6 +164,13 @@ class DeviceSetupWizardTest extends TestCase
         $this->assertStringContainsString("Set-Location (Join-Path \$HOME 'Downloads')", $windows->command);
         $this->assertStringContainsString('https://phone.twinsofte.com/downloads/deviceguard.apk', $windows->command);
         $this->assertStringContainsString('Get-Item .\\deviceguard.apk |', $windows->command);
+        $this->assertStringContainsString('$actualHash = (Get-FileHash $apkPath -Algorithm SHA256).Hash.ToUpper()', $windows->command);
+        $this->assertStringContainsString('$expectedHash = $ConfiguredApkFileSha256.Trim().ToUpper()', $windows->command);
+        $this->assertStringContainsString('Expected APK SHA-256: $expectedHash', $windows->command);
+        $this->assertStringContainsString('Downloaded APK SHA-256: $actualHash', $windows->command);
+        $this->assertStringContainsString('The downloaded APK was removed for safety.', $windows->command);
+        $this->assertStringContainsString($fileHash, $windows->command);
+        $this->assertStringNotContainsString($signatureChecksum, $windows->command);
         $this->assertStringContainsString('adb install -r -t .\\deviceguard.apk', $windows->command);
         $this->assertSame('Windows Downloads folder', $windows->run_from);
         $this->assertStringContainsString('cd ~/Downloads', $macos->command);
@@ -176,6 +188,10 @@ class DeviceSetupWizardTest extends TestCase
 
     public function test_helper_scripts_use_the_same_central_apk_url_and_no_checksum_placeholder(): void
     {
+        $fileHash = str_repeat('B', 64);
+        $signatureChecksum = 'wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo';
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_FILE_SHA256, 'value' => $fileHash, 'type' => 'string']);
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_SIGNATURE_CHECKSUM, 'value' => $signatureChecksum, 'type' => 'string']);
         [, $user, $device] = $this->tenant();
         $session = DeviceSetupSession::create([
             'uuid' => (string) Str::uuid(),
@@ -190,7 +206,13 @@ class DeviceSetupWizardTest extends TestCase
         $windowsUrl = URL::temporarySignedRoute('setup.helper', now()->addMinute(), ['setup' => $session, 'os' => 'windows']);
         $windows = $this->actingAs($user)->get($windowsUrl)->assertOk()->getContent();
         $this->assertStringContainsString('-Uri "https://phone.twinsofte.com/downloads/deviceguard.apk"', $windows);
-        $this->assertStringContainsString('APK checksum verification is not configured by Super Admin.', $windows);
+        $this->assertStringContainsString('$actualHash = (Get-FileHash $apkPath -Algorithm SHA256).Hash.ToUpper()', $windows);
+        $this->assertStringContainsString('$expectedHash = $ConfiguredApkFileSha256.Trim().ToUpper()', $windows);
+        $this->assertStringContainsString('Expected APK SHA-256: $expectedHash', $windows);
+        $this->assertStringContainsString('Downloaded APK SHA-256: $actualHash', $windows);
+        $this->assertStringContainsString('APK checksum mismatch. The downloaded APK was removed for safety.', $windows);
+        $this->assertStringContainsString($fileHash, $windows);
+        $this->assertStringNotContainsString($signatureChecksum, $windows);
         $this->assertStringContainsString(SetupInstructionCatalog::WINDOWS_PLATFORM_TOOLS_URL, $windows);
         $this->assertStringContainsString('Connect exactly one Android phone', $windows);
         $this->assertStringContainsString('only primary user 0', $windows);
@@ -203,7 +225,39 @@ class DeviceSetupWizardTest extends TestCase
         $this->assertStringContainsString(SetupInstructionCatalog::MACOS_PLATFORM_TOOLS_URL, $mac);
         $this->assertStringContainsString('Homebrew is not required', $mac);
         $this->assertStringContainsString('Connect exactly one Android phone', $mac);
+        $this->assertStringContainsString($fileHash, $mac);
+        $this->assertStringContainsString('Expected APK SHA-256:', $mac);
+        $this->assertStringContainsString('Downloaded APK SHA-256:', $mac);
+        $this->assertStringNotContainsString($signatureChecksum, $mac);
         $this->assertStringNotContainsString('CONFIGURE_', $windows.$mac);
+    }
+
+    public function test_helpers_stop_when_apk_file_sha256_is_missing_and_never_use_the_signing_checksum(): void
+    {
+        $signatureChecksum = 'wXo23R0TbQ4_eWWGoPLvruPXTrrwnUgdGwS02_qphMo';
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_SIGNATURE_CHECKSUM, 'value' => $signatureChecksum, 'type' => 'string']);
+        [, $user, $device] = $this->tenant();
+        $session = DeviceSetupSession::create([
+            'uuid' => (string) Str::uuid(),
+            'shop_id' => $device->shop_id,
+            'device_id' => $device->id,
+            'started_by' => $user->id,
+            'computer_os' => 'windows',
+            'brand_group' => 'samsung',
+            'mode' => 'setup_helper',
+            'status' => 'in_progress',
+        ]);
+
+        $windowsUrl = URL::temporarySignedRoute('setup.helper', now()->addMinute(), ['setup' => $session, 'os' => 'windows']);
+        $windows = $this->actingAs($user)->get($windowsUrl)->assertOk()->getContent();
+        $this->assertStringContainsString('APK file SHA-256 is not configured by Super Admin.', $windows);
+        $this->assertStringNotContainsString($signatureChecksum, $windows);
+
+        $session->update(['computer_os' => 'macos']);
+        $macUrl = URL::temporarySignedRoute('setup.helper', now()->addMinute(), ['setup' => $session, 'os' => 'macos']);
+        $mac = $this->actingAs($user)->get($macUrl)->assertOk()->getContent();
+        $this->assertStringContainsString('APK file SHA-256 is not configured by Super Admin.', $mac);
+        $this->assertStringNotContainsString($signatureChecksum, $mac);
     }
 
     public function test_beginner_helper_page_explains_exactly_how_to_run_each_os_script(): void
@@ -375,12 +429,14 @@ class DeviceSetupWizardTest extends TestCase
 
         $response = $this->actingAs($super)->get(route('settings.qr-provisioning'))->assertOk();
         $response->assertSee('https://phone.twinsofte.com/downloads/deviceguard.apk')
-            ->assertSee('APK checksum verification is not configured by Super Admin.')
+            ->assertSee('APK file SHA-256 is not configured by Super Admin.')
             ->assertSee('com.twinsofte.deviceguard')
             ->assertSee('com.twinsofte.deviceguard/.devicepolicy.DevicePolicyReceiver')
             ->assertSee('Test APK URL')
             ->assertSee('Copy APK URL')
-            ->assertSee('Calculate or verify checksum')
+            ->assertSee('Calculate hosted APK SHA-256')
+            ->assertSee('APK file SHA-256')
+            ->assertSee('Android provisioning signing-certificate checksum')
             ->assertSee('Download APK')
             ->assertSee('Approved Windows Platform Tools')
             ->assertSee('Approved macOS Platform Tools')

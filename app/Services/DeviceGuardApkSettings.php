@@ -8,7 +8,11 @@ class DeviceGuardApkSettings
 {
     public const SETTING_URL = 'provisioning_apk_url';
 
-    public const SETTING_CHECKSUM = 'provisioning_apk_checksum';
+    public const SETTING_FILE_SHA256 = 'provisioning_apk_file_sha256';
+
+    public const SETTING_SIGNATURE_CHECKSUM = 'provisioning_apk_signature_checksum';
+
+    public const LEGACY_SETTING_CHECKSUM = 'provisioning_apk_checksum';
 
     public function url(): string
     {
@@ -19,11 +23,45 @@ class DeviceGuardApkSettings
             : $saved;
     }
 
-    public function checksum(): ?string
+    public function fileSha256(): ?string
     {
-        $saved = trim((string) SystemSetting::value(self::SETTING_CHECKSUM, ''));
+        $saved = trim((string) SystemSetting::value(self::SETTING_FILE_SHA256, ''));
 
-        return $saved === '' || str_starts_with($saved, 'CONFIG'.'URE_') ? null : $saved;
+        return preg_match('/\A[0-9a-fA-F]{64}\z/', $saved) === 1 ? strtoupper($saved) : null;
+    }
+
+    public function signatureChecksum(): ?string
+    {
+        $saved = trim((string) SystemSetting::value(self::SETTING_SIGNATURE_CHECKSUM, ''));
+        if ($saved === '') {
+            $legacy = trim((string) SystemSetting::value(self::LEGACY_SETTING_CHECKSUM, ''));
+            $saved = $this->isSignatureChecksum($legacy) ? $legacy : '';
+        }
+
+        return $this->isSignatureChecksum($saved) ? $saved : null;
+    }
+
+    public function isSignatureChecksum(string $value): bool
+    {
+        if ($value === '' || str_starts_with($value, 'CONFIG'.'URE_')) {
+            return false;
+        }
+
+        if (preg_match('/\A[A-Za-z0-9+\/_-]+={0,2}\z/', $value) !== 1) {
+            return false;
+        }
+
+        $withoutPadding = rtrim($value, '=');
+        $remainder = strlen($withoutPadding) % 4;
+        if ($remainder === 1) {
+            return false;
+        }
+
+        $normalized = strtr($withoutPadding, '-_', '+/');
+        $normalized .= str_repeat('=', (4 - $remainder) % 4);
+        $decoded = base64_decode($normalized, true);
+
+        return $decoded !== false && strlen($decoded) === 32;
     }
 
     public function packageName(): string
