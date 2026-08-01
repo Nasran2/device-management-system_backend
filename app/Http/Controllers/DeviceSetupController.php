@@ -7,6 +7,7 @@ use App\Models\DeviceSetupInstruction;
 use App\Models\DeviceSetupSession;
 use App\Models\SystemSetting;
 use App\Services\AuditService;
+use App\Services\ActivationService;
 use App\Services\DeviceGuardApkSettings;
 use App\Services\SetupInstructionCatalog;
 use Illuminate\Http\Request;
@@ -24,6 +25,7 @@ class DeviceSetupController extends Controller
     public function __construct(
         private SetupInstructionCatalog $catalog,
         private DeviceGuardApkSettings $apk,
+        private ActivationService $activations,
     ) {}
 
     public function index(Request $request)
@@ -93,6 +95,20 @@ class DeviceSetupController extends Controller
             ]);
         }
 
+        $activationState = ['activation' => null, 'plain' => null, 'status' => 'none'];
+        if ($step->step_key === 'activation' && $request->user()->can('viewActivationCode', $setup->device)) {
+            if ($setup->status === 'in_progress' && $request->user()->can('generateActivationCode', $setup->device)) {
+                $issued = $this->activations->ensure($setup->device, $request->user(), $setup, 'setup_activation_stage');
+                if ($issued['generated']) {
+                    $this->activations->sendSmsIfEnabled($setup->device->loadMissing(['customer', 'shop']), $issued['plain'], $request->user());
+                }
+            }
+            $activationState = $this->activations->displayState($setup->device);
+            if ($activationState['plain'] && $activationState['activation']) {
+                $this->activations->recordViewed($activationState['activation'], $request->user());
+            }
+        }
+
         return view('setup.show', [
             'setup' => $setup->fresh()->load(['device.tokens', 'device.offlinePolicy', 'device.commands', 'steps']),
             'steps' => $steps,
@@ -101,6 +117,7 @@ class DeviceSetupController extends Controller
             'progress' => $progress,
             'serverChecks' => $this->serverChecks($setup->device),
             'helperUrl' => URL::temporarySignedRoute('setup.helper', now()->addMinutes(15), ['setup' => $setup, 'os' => $setup->computer_os]),
+            'activationState' => $activationState,
         ]);
     }
 

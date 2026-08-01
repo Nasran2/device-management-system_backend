@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Services\AuditService;
+use App\Services\ActivationService;
 use App\Services\CommandService;
 use App\Services\OfflineProtectionService;
 use Illuminate\Http\Request;
@@ -43,7 +44,7 @@ class ManagementPinController extends Controller
         return response()->json(['success' => true, 'message' => 'PIN verified', 'authorization_token' => $plainToken, 'expires_in' => 60]);
     }
 
-    public function release(Request $request, CommandService $commands, OfflineProtectionService $offline, AuditService $audit)
+    public function release(Request $request, CommandService $commands, OfflineProtectionService $offline, AuditService $audit, ActivationService $activations)
     {
         $data = $request->validate(['authorization_token' => ['required', 'string', 'size:64']]);
         $device = $request->attributes->get('device');
@@ -61,6 +62,7 @@ class ManagementPinController extends Controller
 
         $reason = 'Permanent release authorized with the device Management PIN';
         $offline->permanentRelease($device, null, $reason);
+        $activations->revokeAll($device, null, 'management_pin_permanent_release');
         $command = $commands->create($device, 'PERMANENT_RELEASE', [
             'reason' => $reason,
             'authorization_method' => 'management_pin',

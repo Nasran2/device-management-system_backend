@@ -13,6 +13,7 @@ class ActivationController extends Controller
     {
         $data = $request->validate([
             'activation_code' => ['required', 'string', 'max:20'],
+            'device_reference' => ['nullable', 'uuid'],
             'device_uuid' => ['required', 'uuid'],
             'android_id' => ['nullable', 'string', 'max:255'],
             'fcm_token' => ['nullable', 'string', 'max:4096'],

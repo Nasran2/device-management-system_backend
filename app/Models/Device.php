@@ -66,6 +66,11 @@ class Device extends Model
         return $this->hasMany(DeviceActivation::class);
     }
 
+    public function currentActivation()
+    {
+        return $this->hasOne(DeviceActivation::class)->latestOfMany();
+    }
+
     public function commands()
     {
         return $this->hasMany(DeviceCommand::class);

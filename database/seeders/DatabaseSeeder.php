@@ -47,6 +47,8 @@ class DatabaseSeeder extends Seeder
             ['key' => 'support_phone', 'value' => '+94 11 000 0000', 'type' => 'string', 'is_public' => true],
             ['key' => 'lock_message', 'value' => 'Please complete your pending payment and contact the seller for assistance.', 'type' => 'string', 'is_public' => true],
             ['key' => 'location_retention_days', 'value' => '30', 'type' => 'integer', 'is_public' => false],
+            ['key' => 'device_activation_code_expiry_minutes', 'value' => '1440', 'type' => 'integer', 'is_public' => false],
+            ['key' => 'send_activation_code_by_sms', 'value' => 'false', 'type' => 'boolean', 'is_public' => false],
             ['key' => 'provisioning_api_url', 'value' => 'https://phonelock.twinsofte.com/api/v1/', 'type' => 'string', 'is_public' => false],
             ['key' => 'provisioning_apk_url', 'value' => 'https://phonelock.twinsofte.com/downloads/deviceguard.apk', 'type' => 'string', 'is_public' => false],
             ['key' => 'provisioning_apk_version', 'value' => '1.0.3', 'type' => 'string', 'is_public' => false],

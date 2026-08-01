@@ -17,7 +17,7 @@ Route::prefix('v1')->middleware('throttle:api')->group(function () {
         'message' => 'DeviceGuard API is running',
         'environment' => app()->environment(),
     ]));
-    Route::post('devices/activate', ActivationController::class)->middleware('throttle:5,1');
+    Route::post('devices/activate', ActivationController::class)->middleware('throttle:device-activation');
     Route::post('devices/provision', ProvisioningEnrollmentController::class)->middleware('throttle:5,1');
     Route::middleware('device.auth')->group(function () {
         Route::post('devices/heartbeat', [DeviceSyncController::class, 'heartbeat']);

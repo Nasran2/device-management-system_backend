@@ -101,15 +101,34 @@ class DeviceController extends Controller
             }
         }
 
-        return redirect()->route('devices.show', $device)->with('success', 'Device registered.')->with('activation_code', $code);
+        $activations->sendSmsIfEnabled($device->loadMissing(['customer', 'shop']), $code, $request->user());
+
+        return redirect()->route('devices.show', $device)->with('success', 'Device registered and activation code generated.');
     }
 
-    public function show(Device $device, QrProvisioningService $qr, OfflineProtectionService $offline)
+    public function show(Request $request, Device $device, QrProvisioningService $qr, OfflineProtectionService $offline, ActivationService $activations)
     {
         $this->authorize('view', $device);
+        $canViewActivation = $request->user()->can('viewActivationCode', $device);
+        $activationState = $canViewActivation
+            ? $activations->displayState($device)
+            : ['activation' => null, 'plain' => null, 'status' => 'unauthorized'];
+        if ($activationState['status'] === 'expired' && $activationState['activation']) {
+            $activations->recordExpiry($activationState['activation']);
+        }
+        if ($activationState['plain'] && $activationState['activation']) {
+            $activations->recordViewed($activationState['activation'], $request->user());
+        }
 
         return view('devices.show', [
-            'device' => $device->load(['customer', 'admin', 'shop', 'managementPinChangedBy', 'commands.requester', 'locations', 'offlinePolicy.audits', 'financing.installments', 'commission', 'setupSessions.steps']),
+            'device' => $device->load(['customer', 'admin', 'shop', 'managementPinChangedBy', 'commands.requester', 'locations', 'offlinePolicy.audits', 'financing.installments', 'commission', 'setupSessions.steps', 'activations.generatedBy']),
+            'activationState' => $activationState,
+            'canViewActivationCode' => $canViewActivation,
+            'canGenerateActivationCode' => $request->user()->can('generateActivationCode', $device),
+            'canRevokeActivationCode' => $request->user()->can('revokeActivationCode', $device),
+            'activationHistory' => $request->user()->isSuperAdmin()
+                ? $device->activations()->with('generatedBy')->latest()->limit(20)->get()
+                : collect(),
             'offlinePolicy' => $offline->policyFor($device),
             'offlineGlobal' => OfflineProtectionSetting::current(),
             'qrConfigured' => $qr->configured(),
@@ -164,11 +183,12 @@ class DeviceController extends Controller
         return back()->with('success', 'Command queued. The status will change only after the phone confirms execution.');
     }
 
-    public function release(Request $request, Device $device, CommandService $commands, OfflineProtectionService $offline)
+    public function release(Request $request, Device $device, CommandService $commands, OfflineProtectionService $offline, ActivationService $activations)
     {
         $this->authorize('control', $device);
         $data = $request->validate(['password' => ['required', 'current_password'], 'reason' => ['required', 'string', 'max:1000'], 'confirmed' => ['accepted']]);
         $offline->permanentRelease($device, $request->user(), $data['reason']);
+        $activations->revokeAll($device, $request->user(), 'permanent_device_release');
         $commands->create($device, 'PERMANENT_RELEASE', ['reason' => $data['reason'], 'offline_protection_disabled' => true], $request->user());
 
         return back()->with('success', 'Permanent release has been queued for device confirmation.');

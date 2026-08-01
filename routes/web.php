@@ -3,6 +3,7 @@
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DeviceController;
+use App\Http\Controllers\DeviceActivationCodeController;
 use App\Http\Controllers\DeviceManagementPinController;
 use App\Http\Controllers\DeviceProvisioningController;
 use App\Http\Controllers\DeviceLifecycleController;
@@ -40,6 +41,8 @@ Route::middleware('auth')->group(function () {
     Route::delete('/devices/bulk', [DeviceLifecycleController::class, 'bulkDelete'])->middleware('throttle:3,1')->name('devices.bulk-delete');
     Route::post('/devices/{device}/commands', [DeviceController::class, 'command'])->middleware('throttle:5,1')->name('devices.command');
     Route::post('/devices/{device}/release', [DeviceController::class, 'release'])->middleware('throttle:5,1')->name('devices.release');
+    Route::post('/devices/{device}/activation-code', [DeviceActivationCodeController::class, 'generate'])->middleware('throttle:5,1')->name('devices.activation-code.generate');
+    Route::post('/devices/{device}/activation-code/revoke', [DeviceActivationCodeController::class, 'revoke'])->middleware('throttle:5,1')->name('devices.activation-code.revoke');
     Route::put('/devices/{device}/offline-protection', [DeviceOfflineProtectionController::class, 'update'])->name('devices.offline-protection.update');
     Route::post('/devices/{device}/offline-protection/refresh', [DeviceOfflineProtectionController::class, 'refresh'])->name('devices.offline-protection.refresh');
     Route::post('/devices/{device}/offline-protection/recalculate', [DeviceOfflineProtectionController::class, 'recalculate'])->name('devices.offline-protection.recalculate');

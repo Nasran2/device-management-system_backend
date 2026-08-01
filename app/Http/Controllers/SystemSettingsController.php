@@ -48,6 +48,8 @@ class SystemSettingsController extends Controller
             'device' => [
                 'management_pin_length' => ['required', 'integer', 'between:4,8'],
                 'device_command_expiry_minutes' => ['required', 'integer', 'between:1,1440'],
+                'device_activation_code_expiry_minutes' => ['required', 'integer', 'between:60,10080', 'multiple_of:60'],
+                'send_activation_code_by_sms' => ['nullable', 'boolean'],
                 'default_lock_enabled' => ['nullable', 'boolean'],
                 'default_unlock_enabled' => ['nullable', 'boolean'],
             ],
@@ -60,7 +62,7 @@ class SystemSettingsController extends Controller
 
         $data = $request->validate($rules + ['password' => ['required', 'current_password']]);
         unset($data['password']);
-        foreach (['allow_custom_shop_percentage', 'default_lock_enabled', 'default_unlock_enabled'] as $flag) {
+        foreach (['allow_custom_shop_percentage', 'default_lock_enabled', 'default_unlock_enabled', 'send_activation_code_by_sms'] as $flag) {
             if (array_key_exists($flag, $rules)) {
                 $data[$flag] = $request->boolean($flag);
             }

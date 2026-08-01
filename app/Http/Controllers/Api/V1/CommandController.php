@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Http\Controllers\Controller;
 use App\Models\DeviceCommand;
 use App\Services\AuditService;
+use App\Services\ActivationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
@@ -37,7 +38,7 @@ class CommandController extends Controller
         return response()->json(['message'=>'Execution acknowledged.']);
     }
 
-    public function result(Request $request, DeviceCommand $command, AuditService $audit)
+    public function result(Request $request, DeviceCommand $command, AuditService $audit, ActivationService $activations)
     {
         $device = $request->attributes->get('device');
         abort_unless($command->device_id === $device->id, 404);
@@ -61,6 +62,7 @@ class CommandController extends Controller
             };
             $device->update($updates + ['last_seen_at' => now()]);
             if ($command->type === 'PERMANENT_RELEASE') {
+                $activations->revokeAll($device, null, 'permanent_release_confirmed');
                 $device->tokens()->whereNull('revoked_at')->update(['revoked_at' => now()]);
                 $device->commands()->where('id', '!=', $command->id)->whereIn('status', ['pending', 'dispatched', 'delivered', 'executing'])->update(['status' => 'cancelled']);
             }

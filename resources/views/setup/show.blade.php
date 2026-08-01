@@ -68,6 +68,10 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
                         <p class="mt-2 text-sm leading-6 text-indigo-950">{{ $step->why_required }}</p>
                     </div>
 
+                    @if($step->step_key === 'activation')
+                        @include('setup._activation-code-panel')
+                    @endif
+
                     @if($step->screenshot_path)
                         <figure class="overflow-hidden rounded-2xl border border-slate-200"><img class="w-full" src="{{ asset('storage/'.$step->screenshot_path) }}" alt="{{ $step->title }} reference"><figcaption class="p-3 text-xs text-slate-500">Super Admin reference screenshot</figcaption></figure>
                     @endif

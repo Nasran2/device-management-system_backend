@@ -36,6 +36,24 @@ class DevicePolicy
         return $this->tenant($user, $device) && $user->canShop('devices');
     }
 
+    public function viewActivationCode(User $user, Device $device): bool
+    {
+        return $this->tenant($user, $device) && $user->canShop('device_activation_code.view');
+    }
+
+    public function generateActivationCode(User $user, Device $device): bool
+    {
+        return $this->tenant($user, $device)
+            && ! $device->isReleased()
+            && $user->canShop('device_activation_code.generate');
+    }
+
+    public function revokeActivationCode(User $user, Device $device): bool
+    {
+        return $this->tenant($user, $device)
+            && $user->canShop('device_activation_code.revoke');
+    }
+
     public function resetPinAttempts(User $user, Device $device): bool
     {
         return $user->isSuperAdmin();

@@ -24,7 +24,7 @@
                 <fieldset>
                     <legend class="field-label">Permissions</legend>
                     <div class="mt-2 grid gap-2 sm:grid-cols-2">
-                        @foreach(['customers.manage'=>'Manage customers','devices.create'=>'Register devices','devices.lock'=>'Lock or unlock','payments.create'=>'Receive payments','payments.reverse'=>'Reverse payments','setup.manage'=>'Run setup wizard','reports.view'=>'View reports','shop.settings'=>'Shop settings','commission.view'=>'Commission view'] as $permission=>$label)
+                        @foreach(['customers.manage'=>'Manage customers','devices.create'=>'Register devices','devices.lock'=>'Lock or unlock','payments.create'=>'Receive payments','payments.reverse'=>'Reverse payments','setup.manage'=>'Run setup wizard','device_activation_code.view'=>'View activation codes','device_activation_code.generate'=>'Generate activation codes','device_activation_code.revoke'=>'Revoke activation codes','reports.view'=>'View reports','shop.settings'=>'Shop settings','commission.view'=>'Commission view'] as $permission=>$label)
                             <label class="rounded-xl bg-slate-50 p-3"><input type="checkbox" name="shop_permissions[]" value="{{ $permission }}"> {{ $label }}</label>
                         @endforeach
                     </div>
@@ -47,7 +47,7 @@
                         @endforeach
                     </select>
                     <div class="mt-3 grid gap-2 sm:grid-cols-2">
-                        @foreach(['customers.manage'=>'Customers','devices.create'=>'Device registration','devices.lock'=>'Lock/unlock','payments.create'=>'Receive payments','payments.reverse'=>'Reverse payments','setup.manage'=>'Setup wizard','reports.view'=>'Reports','shop.settings'=>'Shop settings','commission.view'=>'Commission view'] as $permission=>$label)
+                        @foreach(['customers.manage'=>'Customers','devices.create'=>'Device registration','devices.lock'=>'Lock/unlock','payments.create'=>'Receive payments','payments.reverse'=>'Reverse payments','setup.manage'=>'Setup wizard','device_activation_code.view'=>'View activation codes','device_activation_code.generate'=>'Generate activation codes','device_activation_code.revoke'=>'Revoke activation codes','reports.view'=>'Reports','shop.settings'=>'Shop settings','commission.view'=>'Commission view'] as $permission=>$label)
                             <label class="text-sm"><input type="checkbox" name="shop_permissions[]" value="{{ $permission }}" @checked(in_array($permission,$staff->shop_permissions??[],true))> {{ $label }}</label>
                         @endforeach
                     </div>
