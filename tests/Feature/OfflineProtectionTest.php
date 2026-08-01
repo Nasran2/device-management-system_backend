@@ -230,6 +230,116 @@ class OfflineProtectionTest extends TestCase
         $this->assertNotNull($policy->policy_acknowledged_at);
     }
 
+    public function test_older_apk_can_acknowledge_without_optional_telemetry_fields(): void
+    {
+        $device = $this->device($this->user());
+        $plain = 'older-apk-device-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $plain)]);
+        $envelope = app(OfflineProtectionService::class)->issue($device);
+        Log::spy();
+
+        $response = $this->withToken($plain)->postJson('/api/v1/devices/offline-policy/acknowledge', [
+            'policy_version' => $envelope['payload']['policy_version'],
+            'nonce' => $envelope['payload']['nonce'],
+            'signature_verified' => true,
+            'stored_successfully' => true,
+        ])->assertOk()
+            ->assertJsonPath('message', 'Signed policy verified and acknowledged.')
+            ->assertJsonStructure(['message', 'data' => ['last_verified_at', 'offline_deadline_at']]);
+
+        $policy = $device->offlinePolicy()->firstOrFail();
+        $this->assertNotNull($policy->policy_acknowledged_at);
+        $this->assertNotNull($policy->last_verified_at);
+        $this->assertNotNull($policy->offline_deadline_at);
+        $this->assertNull($policy->phone_reported_deadline_at);
+        $this->assertFalse($policy->phone_local_locked);
+        $this->assertSame($policy->last_verified_at->copy()->addSeconds($policy->max_offline_seconds)->timestamp, $policy->offline_deadline_at->timestamp);
+        $this->assertSame($policy->last_verified_at->toIso8601String(), $response->json('data.last_verified_at'));
+
+        Log::shouldHaveReceived('info')->with(
+            'Offline policy acknowledgement request received.',
+            \Mockery::on(fn (array $context) => $context['device_id'] === $device->id
+                && $context['policy_version'] === $envelope['payload']['policy_version']
+                && $context['nonce_fingerprint'] === hash('sha256', $envelope['payload']['nonce'])
+                && ! in_array('last_trusted_server_time', $context['provided_fields'], true)
+                && ! str_contains(json_encode($context), $envelope['payload']['nonce'])),
+        )->once();
+        Log::shouldHaveReceived('info')->with(
+            'Offline policy acknowledgement completed successfully.',
+            \Mockery::on(fn (array $context) => $context['device_id'] === $device->id
+                && $context['policy_acknowledged_at'] !== null
+                && $context['last_verified_at'] !== null
+                && $context['offline_deadline_at'] !== null),
+        )->once();
+    }
+
+    public function test_nullable_legacy_acknowledgement_telemetry_is_accepted(): void
+    {
+        $device = $this->device($this->user());
+        $plain = 'nullable-legacy-fields-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $plain)]);
+        $envelope = app(OfflineProtectionService::class)->issue($device);
+
+        $this->withToken($plain)->postJson('/api/v1/devices/offline-policy/acknowledge', [
+            'policy_version' => $envelope['payload']['policy_version'],
+            'nonce' => $envelope['payload']['nonce'],
+            'signature_verified' => true,
+            'stored_successfully' => true,
+            'local_deadline_at' => null,
+            'last_trusted_server_time' => null,
+            'local_locked' => null,
+            'network_status' => null,
+        ])->assertOk();
+
+        $this->assertNotNull($device->offlinePolicy()->firstOrFail()->policy_acknowledged_at);
+    }
+
+    public function test_acknowledgement_validation_failure_is_logged_and_preserves_validation_response(): void
+    {
+        $device = $this->device($this->user());
+        $plain = 'invalid-acknowledgement-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $plain)]);
+        $envelope = app(OfflineProtectionService::class)->issue($device);
+        Log::spy();
+
+        $this->withToken($plain)->postJson('/api/v1/devices/offline-policy/acknowledge', [
+            'policy_version' => $envelope['payload']['policy_version'],
+            'nonce' => $envelope['payload']['nonce'],
+            'signature_verified' => true,
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('stored_successfully');
+
+        $this->assertNull($device->offlinePolicy()->firstOrFail()->policy_acknowledged_at);
+        Log::shouldHaveReceived('warning')->with(
+            'Offline policy acknowledgement validation failed.',
+            \Mockery::on(fn (array $context) => $context['device_id'] === $device->id
+                && in_array('stored_successfully', $context['failed_fields'], true)),
+        )->once();
+    }
+
+    public function test_acknowledgement_nonce_mismatch_exception_is_logged_and_rejected(): void
+    {
+        $device = $this->device($this->user());
+        $plain = 'mismatched-acknowledgement-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $plain)]);
+        $envelope = app(OfflineProtectionService::class)->issue($device);
+        Log::spy();
+
+        $this->withToken($plain)->postJson('/api/v1/devices/offline-policy/acknowledge', [
+            'policy_version' => $envelope['payload']['policy_version'],
+            'nonce' => str_repeat('x', 48),
+            'signature_verified' => true,
+            'stored_successfully' => true,
+        ])->assertUnprocessable()->assertJsonValidationErrors('policy');
+
+        $this->assertNull($device->offlinePolicy()->firstOrFail()->policy_acknowledged_at);
+        Log::shouldHaveReceived('warning')->with(
+            'Offline policy acknowledgement was rejected.',
+            \Mockery::on(fn (array $context) => $context['device_id'] === $device->id
+                && in_array('policy', $context['failed_fields'], true)),
+        )->once();
+    }
+
     public function test_heartbeat_returns_signed_offline_unlock_authorization_only_for_offline_timeout(): void
     {
         $device = $this->device($this->user());

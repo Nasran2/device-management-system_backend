@@ -119,15 +119,19 @@ class OfflineProtectionService
             }
             $now = CarbonImmutable::now('UTC')->startOfSecond();
             $deadline = $policy->enabled && ! $policy->permanent_release ? $now->addSeconds($policy->max_offline_seconds) : null;
+            $phoneDeadline = $data['local_deadline_at'] ?? null;
+            $phoneLocalLocked = array_key_exists('local_locked', $data)
+                ? (bool) $data['local_locked']
+                : (bool) $policy->phone_local_locked;
             $policy->update([
                 'last_verified_at' => $now,
                 'offline_deadline_at' => $deadline,
                 'policy_acknowledged_at' => $now,
-                'phone_reported_deadline_at' => $data['local_deadline_at'],
-                'last_network_status' => $data['network_status'] ?? null,
-                'phone_local_locked' => $data['local_locked'],
+                'phone_reported_deadline_at' => $phoneDeadline,
+                'last_network_status' => $data['network_status'] ?? $policy->last_network_status,
+                'phone_local_locked' => $phoneLocalLocked,
             ]);
-            $this->audit($device, 'POLICY_ACKNOWLEDGED', $policy, null, ['phone_deadline' => $data['local_deadline_at']]);
+            $this->audit($device, 'POLICY_ACKNOWLEDGED', $policy, null, ['phone_deadline' => $phoneDeadline]);
             $this->audit($device, 'VERIFICATION_SUCCESS', $policy);
             $this->audit($device, 'DEADLINE_RESET', $policy, null, ['deadline' => $deadline?->toIso8601String()]);
             return $policy->fresh();
