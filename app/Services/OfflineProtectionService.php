@@ -51,13 +51,20 @@ class OfflineProtectionService
         return $policy;
     }
 
-    public function issue(Device $device): array
+    public function issue(Device $device, bool $offlineRecoveryRequested = false): array
     {
         $policy = $this->policyFor($device);
         $global = OfflineProtectionSetting::current();
         $now = CarbonImmutable::now('UTC')->startOfSecond();
         $deadline = $now->addSeconds($policy->max_offline_seconds);
         $nonce = Str::random(48);
+        // Recovery is deliberately narrow: the authenticated phone must report an
+        // OFFLINE_TIMEOUT lock and the server must still consider it fully unlocked.
+        // Manual, payment, administrator, pending-lock and released states never qualify.
+        $offlineUnlockAuthorized = $offlineRecoveryRequested
+            && ! $device->isReleased()
+            && $device->status === 'active_unlocked'
+            && $device->lock_status === 'unlocked';
         $payload = [
             'device_uuid' => (string) $device->device_uuid,
             'expires_at' => $deadline->addDay()->toIso8601String(),
@@ -68,6 +75,8 @@ class OfflineProtectionService
             'nonce' => $nonce,
             'offline_deadline_at' => $deadline->toIso8601String(),
             'offline_protection_enabled' => (bool) $policy->enabled,
+            'offline_unlock_authorized' => $offlineUnlockAuthorized,
+            'offline_unlock_reason' => $offlineUnlockAuthorized ? 'OFFLINE_TIMEOUT' : 'NONE',
             'permanent_release' => (bool) $policy->permanent_release,
             'policy_version' => (int) $policy->policy_version,
             'server_utc_time' => $now->toIso8601String(),
@@ -79,6 +88,16 @@ class OfflineProtectionService
             'last_issued_nonce' => hash('sha256', $nonce),
         ]);
         $this->audit($device, 'POLICY_SENT', $policy, null, ['deadline' => $payload['offline_deadline_at']]);
+        if ($offlineRecoveryRequested) {
+            $this->audit(
+                $device,
+                $offlineUnlockAuthorized ? 'OFFLINE_UNLOCK_AUTHORIZED' : 'OFFLINE_UNLOCK_DENIED',
+                $policy,
+                null,
+                ['server_status' => $device->status, 'server_lock_status' => $device->lock_status],
+                $offlineUnlockAuthorized ? 'Fresh signed server authorization issued.' : 'Server lock state does not permit offline recovery.'
+            );
+        }
 
         return ['payload' => $payload, 'signature' => $this->sign($payload), 'algorithm' => 'SHA256withRSA'];
     }
@@ -133,10 +152,10 @@ class OfflineProtectionService
         return $policy->fresh();
     }
 
-    public function permanentRelease(Device $device, User $user, string $reason): void
+    public function permanentRelease(Device $device, ?User $user, string $reason): void
     {
         $policy = $this->policyFor($device);
-        $policy->update(['enabled' => false, 'permanent_release' => true, 'offline_deadline_at' => null, 'policy_version' => $policy->policy_version + 1, 'updated_by' => $user->id]);
+        $policy->update(['enabled' => false, 'permanent_release' => true, 'offline_deadline_at' => null, 'policy_version' => $policy->policy_version + 1, 'updated_by' => $user?->id]);
         $this->audit($device, 'PROTECTION_DISABLED', $policy, $user, [], $reason);
         $this->audit($device, 'PERMANENT_RELEASED', $policy, $user, [], $reason);
     }

@@ -53,8 +53,15 @@ class DeviceSetupWizardTest extends TestCase
     {
         $catalog = app(SetupInstructionCatalog::class);
         $mac = $catalog->for('macos', 'samsung');
+        $this->assertCount(20, $mac);
         $this->assertFalse($mac->contains('step_key', 'usb_driver'));
+        $this->assertTrue($mac->contains('step_key', 'mac_usb_preflight'));
+        $this->assertTrue($mac->contains('step_key', 'factory_reset'));
         $this->assertStringNotContainsString('Get-PnpDevice', $mac->pluck('command')->filter()->implode("\n"));
+        $this->assertStringContainsString('system_profiler SPUSBDataType', $mac->firstWhere('step_key', 'mac_usb_preflight')->command);
+        $this->assertStringContainsString(SetupInstructionCatalog::MACOS_PLATFORM_TOOLS_URL, $mac->firstWhere('step_key', 'adb_install')->command);
+        $this->assertStringContainsString('deviceguard-tools/platform-tools', $mac->firstWhere('step_key', 'adb_install')->command);
+        $this->assertStringNotContainsString('brew install', $mac->firstWhere('step_key', 'adb_install')->command);
 
         $xiaomi = $catalog->for('windows', 'xiaomi')->pluck('numbered_instructions')->flatten()->implode(' ');
         $this->assertStringContainsString('MIUI', $xiaomi);
@@ -149,13 +156,22 @@ class DeviceSetupWizardTest extends TestCase
         $this->assertStringNotContainsString('CONFIGURE_APK_URL_IN_SUPER_ADMIN', $allText);
         $this->assertStringNotContainsString('CONFIGURE_SHA256_IN_SUPER_ADMIN', $allText);
         $this->assertStringNotContainsString('phonelock.twinsofte.com/downloads', $allText);
-        $this->assertStringContainsString("Invoke-WebRequest `\n-Uri \"https://phone.twinsofte.com/downloads/deviceguard.apk\" `\n-OutFile \".\\deviceguard.apk\"", $windows->command);
+        $this->assertStringContainsString("Set-Location (Join-Path \$HOME 'Downloads')", $windows->command);
+        $this->assertStringContainsString('https://phone.twinsofte.com/downloads/deviceguard.apk', $windows->command);
         $this->assertStringContainsString('Get-Item .\\deviceguard.apk |', $windows->command);
-        $this->assertStringContainsString('.\\adb.exe install -r -t .\\deviceguard.apk', $windows->command);
-        $this->assertSame('C:\platform-tools', $windows->run_from);
-        $this->assertStringContainsString("cd ~/Downloads\n\ncurl -L \\\n\"https://phone.twinsofte.com/downloads/deviceguard.apk\" \\\n-o deviceguard.apk", $macos->command);
+        $this->assertStringContainsString('adb install -r -t .\\deviceguard.apk', $windows->command);
+        $this->assertSame('Windows Downloads folder', $windows->run_from);
+        $this->assertStringContainsString('cd ~/Downloads', $macos->command);
+        $this->assertStringContainsString('https://phone.twinsofte.com/downloads/deviceguard.apk', $macos->command);
+        $this->assertStringContainsString('-o deviceguard.apk', $macos->command);
         $this->assertStringContainsString('adb install -r -t deviceguard.apk', $macos->command);
         $this->assertSame('~/Downloads', $macos->run_from);
+
+        $windowsTools = $catalog->for('windows', 'samsung')->firstWhere('step_key', 'adb_install');
+        $this->assertStringContainsString(SetupInstructionCatalog::WINDOWS_PLATFORM_TOOLS_URL, $windowsTools->command);
+        $this->assertStringContainsString("Join-Path \$env:LOCALAPPDATA 'DeviceGuard'", $windowsTools->command);
+        $this->assertStringContainsString("SetEnvironmentVariable('Path'", $windowsTools->command);
+        $this->assertStringContainsString('.zprofile', $catalog->for('macos', 'samsung')->firstWhere('step_key', 'adb_install')->command);
     }
 
     public function test_helper_scripts_use_the_same_central_apk_url_and_no_checksum_placeholder(): void
@@ -175,12 +191,48 @@ class DeviceSetupWizardTest extends TestCase
         $windows = $this->actingAs($user)->get($windowsUrl)->assertOk()->getContent();
         $this->assertStringContainsString('-Uri "https://phone.twinsofte.com/downloads/deviceguard.apk"', $windows);
         $this->assertStringContainsString('APK checksum verification is not configured by Super Admin.', $windows);
+        $this->assertStringContainsString(SetupInstructionCatalog::WINDOWS_PLATFORM_TOOLS_URL, $windows);
+        $this->assertStringContainsString('Connect exactly one Android phone', $windows);
+        $this->assertStringContainsString('only primary user 0', $windows);
+        $this->assertStringNotContainsString('Configure the official Platform Tools', $windows);
 
         $session->update(['computer_os' => 'macos']);
         $macUrl = URL::temporarySignedRoute('setup.helper', now()->addMinute(), ['setup' => $session, 'os' => 'macos']);
         $mac = $this->actingAs($user)->get($macUrl)->assertOk()->getContent();
-        $this->assertStringContainsString("\"https://phone.twinsofte.com/downloads/deviceguard.apk\" \\\n-o deviceguard.apk", $mac);
+        $this->assertStringContainsString('https://phone.twinsofte.com/downloads/deviceguard.apk', $mac);
+        $this->assertStringContainsString(SetupInstructionCatalog::MACOS_PLATFORM_TOOLS_URL, $mac);
+        $this->assertStringContainsString('Homebrew is not required', $mac);
+        $this->assertStringContainsString('Connect exactly one Android phone', $mac);
         $this->assertStringNotContainsString('CONFIGURE_', $windows.$mac);
+    }
+
+    public function test_beginner_helper_page_explains_exactly_how_to_run_each_os_script(): void
+    {
+        [, $user, $device] = $this->tenant();
+        foreach (['windows' => 'Set-ExecutionPolicy -Scope Process', 'macos' => 'chmod +x deviceguard-setup.sh'] as $os => $expected) {
+            $session = DeviceSetupSession::create([
+                'uuid' => (string) Str::uuid(), 'shop_id' => $device->shop_id, 'device_id' => $device->id,
+                'started_by' => $user->id, 'computer_os' => $os, 'brand_group' => 'samsung',
+                'mode' => 'setup_helper', 'status' => 'in_progress',
+            ]);
+            $this->actingAs($user)->get(route('setup.show', $session))->assertOk()
+                ->assertSee('Beginner safety rule')
+                ->assertSee('First complete the phone preparation steps')
+                ->assertSee($expected);
+            $session->delete();
+        }
+    }
+
+    public function test_system_managed_instructions_upgrade_but_super_admin_edits_are_preserved(): void
+    {
+        $catalog = app(SetupInstructionCatalog::class);
+        $instruction = $catalog->for('macos', 'samsung')->firstWhere('step_key', 'mac_usb_preflight');
+        $instruction->update(['title' => 'Old generated title']);
+        $this->assertNotSame('Old generated title', $catalog->for('macos', 'samsung')->firstWhere('step_key', 'mac_usb_preflight')->title);
+
+        $super = User::create(['name' => 'Super', 'email' => 'instruction-owner@example.test', 'password' => 'Password@123', 'role' => 'super_admin', 'is_active' => true]);
+        $instruction->fresh()->update(['title' => 'My approved custom title', 'updated_by' => $super->id]);
+        $this->assertSame('My approved custom title', $catalog->for('macos', 'samsung')->firstWhere('step_key', 'mac_usb_preflight')->title);
     }
 
     public function test_new_step_has_read_only_expected_result_card_and_automatic_default(): void
@@ -269,6 +321,48 @@ class DeviceSetupWizardTest extends TestCase
         ]);
     }
 
+    public function test_wrong_environment_can_be_restarted_without_deleting_history(): void
+    {
+        [, $user, $device] = $this->tenant();
+        $old = DeviceSetupSession::create([
+            'uuid' => (string) Str::uuid(),
+            'shop_id' => $device->shop_id,
+            'device_id' => $device->id,
+            'started_by' => $user->id,
+            'computer_os' => 'windows',
+            'brand_group' => 'samsung',
+            'mode' => 'manual_guided',
+            'current_step' => 4,
+            'status' => 'in_progress',
+        ]);
+
+        $this->actingAs($user)->post(route('setup.restart', $old), [
+            'computer_os' => 'macos',
+            'brand_group' => 'pixel',
+            'mode' => 'setup_helper',
+        ])->assertSessionHasErrors('confirmed');
+
+        $response = $this->actingAs($user)->post(route('setup.restart', $old), [
+            'computer_os' => 'macos',
+            'brand_group' => 'pixel',
+            'mode' => 'setup_helper',
+            'confirmed' => 1,
+        ])->assertSessionHasNoErrors();
+
+        $new = DeviceSetupSession::whereKeyNot($old->id)->firstOrFail();
+        $response->assertRedirect(route('setup.show', $new));
+        $this->assertSame('cancelled', $old->fresh()->status);
+        $this->assertSame('in_progress', $new->status);
+        $this->assertSame('macos', $new->computer_os);
+        $this->assertSame('pixel', $new->brand_group);
+        $this->assertSame(1, $new->current_step);
+        $this->assertDatabaseHas('audit_logs', ['action' => 'SETUP_RESTARTED', 'device_id' => $device->id]);
+
+        $expiredHelper = URL::temporarySignedRoute('setup.helper', now()->addMinute(), ['setup' => $old, 'os' => 'windows']);
+        $this->actingAs($user)->get($expiredHelper)->assertStatus(410);
+        $this->actingAs($user)->get(route('setup.show', $old))->assertOk()->assertSee('Read-only Cancelled session');
+    }
+
     public function test_apk_settings_show_defaults_warning_and_all_required_actions(): void
     {
         $super = User::create([
@@ -287,7 +381,11 @@ class DeviceSetupWizardTest extends TestCase
             ->assertSee('Test APK URL')
             ->assertSee('Copy APK URL')
             ->assertSee('Calculate or verify checksum')
-            ->assertSee('Download APK');
+            ->assertSee('Download APK')
+            ->assertSee('Approved Windows Platform Tools')
+            ->assertSee('Approved macOS Platform Tools')
+            ->assertSee(SetupInstructionCatalog::WINDOWS_PLATFORM_TOOLS_URL)
+            ->assertSee(SetupInstructionCatalog::MACOS_PLATFORM_TOOLS_URL);
     }
 
     public function test_apk_url_action_verifies_status_filename_content_size_and_non_html_response(): void

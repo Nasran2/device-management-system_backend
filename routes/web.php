@@ -85,6 +85,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/device-setup', [DeviceSetupController::class,'index'])->name('setup.index');
     Route::get('/setup/{setup}', [DeviceSetupController::class,'show'])->name('setup.show');
     Route::post('/setup/{setup}/step', [DeviceSetupController::class,'step'])->name('setup.step');
+    Route::post('/setup/{setup}/restart', [DeviceSetupController::class,'restart'])->name('setup.restart');
     Route::get('/setup/{setup}/helper/{os}', [DeviceSetupController::class,'helper'])->middleware('signed')->name('setup.helper');
     Route::get('/settings/setup-instructions', [SetupInstructionController::class, 'index'])->name('setup-instructions.index');
     Route::post('/settings/setup-instructions/sync', [SetupInstructionController::class, 'sync'])->name('setup-instructions.sync');

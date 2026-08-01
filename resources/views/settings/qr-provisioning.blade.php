@@ -48,13 +48,26 @@
 
         <section class="rounded-2xl border border-slate-200 p-5">
             <h2 class="font-bold">Approved Windows Platform Tools</h2>
-            <p class="mt-1 text-sm text-slate-500">Use an official Android Platform Tools HTTPS ZIP URL and its SHA-256 checksum. The helper downloads it only when ADB is missing.</p>
+            <p class="mt-1 text-sm text-slate-500">Optional override. When blank, the helper uses Google’s official latest Windows ZIP. A custom URL requires its SHA-256 checksum.</p>
             <div class="form-grid mt-4">
                 <label class="field-label">Official ZIP URL
-                    <input class="field-input" type="url" name="windows_platform_tools_url" value="{{ old('windows_platform_tools_url', App\Models\SystemSetting::value('windows_platform_tools_url', '')) }}">
+                    <input class="field-input" type="url" name="windows_platform_tools_url" value="{{ old('windows_platform_tools_url', App\Models\SystemSetting::value('windows_platform_tools_url', '')) }}" placeholder="{{ \App\Services\SetupInstructionCatalog::WINDOWS_PLATFORM_TOOLS_URL }}">
                 </label>
                 <label class="field-label">ZIP SHA-256 checksum
                     <input class="field-input" name="windows_platform_tools_checksum" minlength="64" maxlength="64" value="{{ old('windows_platform_tools_checksum', App\Models\SystemSetting::value('windows_platform_tools_checksum', '')) }}">
+                </label>
+            </div>
+        </section>
+
+        <section class="rounded-2xl border border-slate-200 p-5">
+            <h2 class="font-bold">Approved macOS Platform Tools</h2>
+            <p class="mt-1 text-sm text-slate-500">Optional override. When blank, the helper uses Google’s official latest macOS ZIP and does not require Homebrew. A custom URL requires its SHA-256 checksum.</p>
+            <div class="form-grid mt-4">
+                <label class="field-label">Official ZIP URL
+                    <input class="field-input" type="url" name="macos_platform_tools_url" value="{{ old('macos_platform_tools_url', App\Models\SystemSetting::value('macos_platform_tools_url', '')) }}" placeholder="{{ \App\Services\SetupInstructionCatalog::MACOS_PLATFORM_TOOLS_URL }}">
+                </label>
+                <label class="field-label">ZIP SHA-256 checksum
+                    <input class="field-input" name="macos_platform_tools_checksum" minlength="64" maxlength="64" value="{{ old('macos_platform_tools_checksum', App\Models\SystemSetting::value('macos_platform_tools_checksum', '')) }}">
                 </label>
             </div>
         </section>

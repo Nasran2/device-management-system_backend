@@ -121,6 +121,44 @@ class OfflineProtectionTest extends TestCase
         $this->assertNotNull($policy->policy_acknowledged_at);
     }
 
+    public function test_heartbeat_returns_signed_offline_unlock_authorization_only_for_offline_timeout(): void
+    {
+        $device = $this->device($this->user());
+        $plain = 'offline-recovery-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $plain)]);
+
+        $response = $this->withToken($plain)->postJson('/api/v1/devices/heartbeat', [
+            'network_status' => 'online',
+            'local_lock_reason' => 'OFFLINE_TIMEOUT',
+        ])->assertOk()->assertJsonPath('data.offline_policy.payload.offline_unlock_authorized', true)
+            ->assertJsonPath('data.offline_policy.payload.offline_unlock_reason', 'OFFLINE_TIMEOUT');
+
+        $envelope = $response->json('data.offline_policy');
+        $service = app(OfflineProtectionService::class);
+        $this->assertSame(1, openssl_verify($service->canonical($envelope['payload']), base64_decode($envelope['signature']), file_get_contents(config('device.offline_policy_public_key')), OPENSSL_ALGO_SHA256));
+
+        $this->withToken($plain)->postJson('/api/v1/devices/heartbeat', [
+            'network_status' => 'online',
+            'local_lock_reason' => 'INTEGRITY_FAILURE',
+        ])->assertOk()->assertJsonPath('data.offline_policy.payload.offline_unlock_authorized', false)
+            ->assertJsonPath('data.offline_policy.payload.offline_unlock_reason', 'NONE');
+    }
+
+    public function test_manual_or_payment_server_lock_never_receives_offline_unlock_authorization(): void
+    {
+        $device = $this->device($this->user());
+        $device->update(['status' => 'locked', 'lock_status' => 'locked']);
+        $plain = 'server-locked-recovery-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $plain)]);
+
+        $this->withToken($plain)->postJson('/api/v1/devices/heartbeat', [
+            'network_status' => 'online',
+            'local_lock_reason' => 'OFFLINE_TIMEOUT',
+        ])->assertOk()->assertJsonPath('data.offline_policy.payload.offline_unlock_authorized', false)
+            ->assertJsonPath('data.status', 'locked')
+            ->assertJsonPath('data.lock_status', 'locked');
+    }
+
     public function test_permanent_release_disables_protection_and_is_audited(): void
     {
         $user = $this->user('super_admin'); $device = $this->device($user);

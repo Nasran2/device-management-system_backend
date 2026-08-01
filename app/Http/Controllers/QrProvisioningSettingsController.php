@@ -51,6 +51,8 @@ class QrProvisioningSettingsController extends Controller
             'provisioning_support_phone' => ['nullable', 'string', 'max:30'],
             'windows_platform_tools_url' => ['nullable', 'url', 'starts_with:https://'],
             'windows_platform_tools_checksum' => ['nullable', 'string', 'size:64', 'required_with:windows_platform_tools_url'],
+            'macos_platform_tools_url' => ['nullable', 'url', 'starts_with:https://'],
+            'macos_platform_tools_checksum' => ['nullable', 'string', 'size:64', 'required_with:macos_platform_tools_url'],
             'wifi_security_type' => ['nullable', Rule::in(['WPA', 'WEP', 'NONE'])],
             'wifi_ssid' => ['nullable', 'string', 'max:32'],
             'wifi_password' => ['nullable', 'string', 'max:255', Rule::requiredIf($requiresNewPassword)],
@@ -59,10 +61,13 @@ class QrProvisioningSettingsController extends Controller
         if (filled($data['windows_platform_tools_url'] ?? null) && $this->isUnsafeUrl($data['windows_platform_tools_url'])) {
             throw ValidationException::withMessages(['windows_platform_tools_url' => 'Private or local Platform Tools URLs are forbidden.']);
         }
+        if (filled($data['macos_platform_tools_url'] ?? null) && $this->isUnsafeUrl($data['macos_platform_tools_url'])) {
+            throw ValidationException::withMessages(['macos_platform_tools_url' => 'Private or local Platform Tools URLs are forbidden.']);
+        }
         $data['provisioning_package_name'] = $data['provisioning_package_name'] ?? $this->apk->packageName();
         $data['provisioning_device_admin_receiver'] = $data['provisioning_device_admin_receiver'] ?? $this->apk->receiver();
 
-        foreach (['provisioning_api_url', 'provisioning_apk_url', 'provisioning_apk_version', 'provisioning_apk_checksum', 'provisioning_package_name', 'provisioning_device_admin_receiver', 'provisioning_qr_expiry_minutes', 'provisioning_support_phone', 'windows_platform_tools_url', 'windows_platform_tools_checksum'] as $key) {
+        foreach (['provisioning_api_url', 'provisioning_apk_url', 'provisioning_apk_version', 'provisioning_apk_checksum', 'provisioning_package_name', 'provisioning_device_admin_receiver', 'provisioning_qr_expiry_minutes', 'provisioning_support_phone', 'windows_platform_tools_url', 'windows_platform_tools_checksum', 'macos_platform_tools_url', 'macos_platform_tools_checksum'] as $key) {
             SystemSetting::updateOrCreate(['key' => $key], ['value' => $data[$key] ?? null, 'type' => $key === 'provisioning_qr_expiry_minutes' ? 'integer' : 'string']);
         }
         SystemSetting::updateOrCreate(['key' => 'qr_provisioning_enabled'], ['value' => $request->boolean('qr_provisioning_enabled') ? 'true' : 'false', 'type' => 'boolean']);

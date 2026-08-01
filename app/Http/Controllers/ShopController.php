@@ -34,7 +34,7 @@ class ShopController extends Controller{
             'reference_code'=>['nullable','string','max:50'],
             'commission_percentage'=>['required','numeric','min:0','max:100'],
             'commission_basis'=>['required','in:selling_price_percentage,financed_balance_percentage,fixed_per_device,custom_per_device'],
-            'fixed_commission_amount'=>['nullable','numeric','min:0'],
+            'fixed_commission_amount'=>['required_if:commission_basis,fixed_per_device','nullable','numeric','min:0'],
             'status'=>['required','in:active,inactive'],
             'sms_enabled'=>['nullable','boolean'],
             'device_registration_enabled'=>['nullable','boolean'],

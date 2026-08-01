@@ -16,18 +16,22 @@ class DeviceSyncController extends Controller
             'network_status' => ['nullable', 'string', 'max:30'],
             'fcm_token' => ['nullable', 'string', 'max:4096'],
             'app_version' => ['nullable', 'string', 'max:50'],
+            'local_lock_reason' => ['nullable', 'in:NONE,OFFLINE_TIMEOUT,INTEGRITY_FAILURE,SERVER_LOCK,UNKNOWN_PROTECTED_LOCK'],
         ]);
         $device = $request->attributes->get('device');
+        $localLockReason = $data['local_lock_reason'] ?? 'NONE';
+        unset($data['local_lock_reason']);
         $device->update($data + ['last_seen_at' => now(), 'last_sync_at' => now()]);
 
-        $signedPolicy = $offline->issue($device->fresh());
+        $freshDevice = $device->fresh();
+        $signedPolicy = $offline->issue($freshDevice, $localLockReason === 'OFFLINE_TIMEOUT');
         $commands = $device->commands()->whereIn('status', ['pending', 'dispatched'])->where('expires_at', '>', now())->oldest()->get()
             ->map->only(['id', 'uuid', 'type', 'payload', 'signature', 'expires_at', 'status']);
 
         return response()->json(['data' => [
             'server_utc_time' => now('UTC')->toIso8601String(),
-            'status' => $device->fresh()->status,
-            'lock_status' => $device->fresh()->lock_status,
+            'status' => $freshDevice->status,
+            'lock_status' => $freshDevice->lock_status,
             'commands' => $commands,
             'offline_policy' => $signedPolicy,
         ]]);

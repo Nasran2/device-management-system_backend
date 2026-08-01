@@ -32,5 +32,6 @@ Route::prefix('v1')->middleware('throttle:api')->group(function () {
         Route::get('configuration', ConfigurationController::class);
         Route::post('access-codes/redeem', [AccessCodeController::class, 'redeem'])->middleware('throttle:5,1');
         Route::post('device/management-pin/verify', [ManagementPinController::class, 'verify'])->middleware('throttle:10,1');
+        Route::post('device/management-pin/release', [ManagementPinController::class, 'release'])->middleware('throttle:5,1');
     });
 });

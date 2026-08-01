@@ -21,11 +21,35 @@
         <div class="mt-4 h-2.5 overflow-hidden rounded-full bg-slate-200"><div class="h-full rounded-full bg-indigo-600 transition-all" style="width:{{ $percent }}%"></div></div>
     </header>
 
-    @if($setup->mode === 'setup_helper')
-        <div class="mb-6 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-indigo-200 bg-indigo-50 p-5">
-            <div><p class="font-black text-indigo-950">Setup Helper is enabled</p><p class="text-sm text-indigo-800">The signed helper runs only on this authorized computer. It cannot prove Android/server state, so every wizard verification still applies.</p></div>
-            <a class="primary-button" href="{{ $helperUrl }}">Download authenticated {{ $setup->computer_os==='macos'?'macOS shell':'Windows PowerShell' }} helper</a>
+    <section class="mb-6 grid gap-4 rounded-2xl border border-amber-300 bg-amber-50 p-5 text-amber-950 lg:grid-cols-[1fr_auto]">
+        <div>
+            <p class="text-xs font-black uppercase tracking-wider text-amber-700">Beginner safety rule</p>
+            <h2 class="mt-1 text-lg font-black">Do one numbered step at a time and stop when the result is different.</h2>
+            <p class="mt-2 text-sm leading-6">Use the {{ $setup->computer_os === 'macos' ? 'Mac Terminal' : 'Windows PowerShell' }} instructions on this page. Never guess a replacement command, bypass a Google/FRP screen, or continue past a red error. Your progress is saved automatically after each verified step.</p>
         </div>
+        <div class="rounded-xl bg-white/70 px-4 py-3 text-sm font-bold">Computer: {{ \App\Services\SetupInstructionCatalog::OSES[$setup->computer_os] }}<br>Phone: {{ $brandLabel }}</div>
+    </section>
+
+    @if($setup->mode === 'setup_helper' && $setup->status === 'in_progress')
+        <section class="mb-6 rounded-2xl border border-indigo-200 bg-indigo-50 p-5">
+            <div class="flex flex-wrap items-start justify-between gap-4"><div><p class="font-black text-indigo-950">Setup Helper is enabled</p><p class="mt-1 max-w-3xl text-sm leading-6 text-indigo-800">First complete the phone preparation steps in this wizard through <strong>Enable USB debugging</strong>. Then download and run the helper. It performs guarded computer checks, but activation and every live server verification still happen in this browser.</p></div><a class="primary-button" href="{{ $helperUrl }}">1. Download {{ $setup->computer_os==='macos'?'macOS helper':'Windows helper' }}</a></div>
+            <div class="mt-4 rounded-xl border border-indigo-200 bg-white p-4">
+                <p class="font-black text-slate-900">2. Run the downloaded helper</p>
+                @if($setup->computer_os === 'macos')
+                    <ol class="mt-2 list-decimal space-y-1 pl-5 text-sm text-slate-700"><li>Delete any older <code>deviceguard-setup.sh</code> from Downloads before downloading, so the browser keeps the exact filename.</li><li>Press Command + Space, type <strong>Terminal</strong>, then press Return.</li><li>Copy the block below, paste with Command + V, and press Return.</li><li>Read each prompt and type only the requested confirmation.</li></ol>
+                    <pre id="helper-run-command" class="mt-3 overflow-x-auto rounded-xl bg-slate-950 p-4 text-sm text-emerald-300">cd ~/Downloads
+chmod +x deviceguard-setup.sh
+./deviceguard-setup.sh</pre>
+                @else
+                    <ol class="mt-2 list-decimal space-y-1 pl-5 text-sm text-slate-700"><li>Delete any older <code>deviceguard-setup.ps1</code> from Downloads before downloading, so the browser keeps the exact filename.</li><li>Click Start, type <strong>PowerShell</strong>, and open Windows PowerShell.</li><li>Copy the block below, right-click once in PowerShell to paste, and press Enter.</li><li>This bypass applies only to this one PowerShell window; it does not weaken the computer permanently.</li></ol>
+                    <pre id="helper-run-command" class="mt-3 overflow-x-auto rounded-xl bg-slate-950 p-4 text-sm text-emerald-300">Set-Location "$HOME\Downloads"
+Unblock-File ".\deviceguard-setup.ps1"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+&amp; ".\deviceguard-setup.ps1"</pre>
+                @endif
+                <button type="button" class="secondary-button mt-3" onclick="copySetupText('helper-run-command', this)">Copy run instructions</button>
+            </div>
+        </section>
     @endif
 
     <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -61,7 +85,7 @@
                         <section class="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 text-white">
                             <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
                                 <div><span class="rounded bg-slate-800 px-2 py-1 text-xs font-bold text-cyan-300">{{ $step->shell_type }}</span><span class="ml-2 text-xs text-slate-400">Run from: {{ $step->run_from }}</span></div>
-                                <button type="button" class="rounded-lg bg-white/10 px-3 py-2 text-xs font-bold hover:bg-white/20" onclick="navigator.clipboard.writeText(document.getElementById('setup-command').innerText); this.textContent='Copied ✓'">Copy command</button>
+                                <button type="button" class="rounded-lg bg-white/10 px-3 py-2 text-xs font-bold hover:bg-white/20" onclick="copySetupText('setup-command', this)">Copy command</button>
                             </div>
                             <pre id="setup-command" class="max-w-full overflow-x-auto whitespace-pre-wrap break-all p-5 text-sm leading-7 text-emerald-300 sm:break-words">{{ $step->command }}</pre>
                             @if($step->terminal_help)<p class="border-t border-slate-800 px-5 py-3 text-xs text-slate-400">Terminal help: {{ $step->terminal_help }}</p>@endif
@@ -91,6 +115,7 @@
                         </section>
                     @endif
 
+                    @if($setup->status === 'in_progress')
                     <form method="post" action="{{ route('setup.step',$setup) }}" class="space-y-6" id="step-form">
                         @csrf
                         <input type="hidden" name="step_key" value="{{ $step->step_key }}">
@@ -148,13 +173,29 @@
                     @if($currentIndex > 0)
                         <form id="previous-form" method="post" action="{{ route('setup.step',$setup) }}">@csrf<input type="hidden" name="step_key" value="{{ $step->step_key }}"><input type="hidden" name="direction" value="previous"></form>
                     @endif
+                    @else
+                        <section class="rounded-2xl border border-slate-300 bg-slate-50 p-5"><h3 class="font-black text-slate-900">Read-only {{ str($setup->status)->replace('_',' ')->title() }} session</h3><p class="mt-1 text-sm text-slate-600">The saved instructions and results remain available for review, but this session cannot be changed.</p></section>
+                    @endif
                 </div>
             </section>
 
             <section id="support" class="panel p-6">
                 <h2 class="section-title">Search and support</h2>
                 <p class="section-copy">Search this step’s visible instructions and errors, or return to the device page for server command diagnostics.</p>
-                <div class="mt-4 flex flex-wrap gap-3"><input id="step-search" class="field-input max-w-lg" type="search" placeholder="Search this page…" oninput="window.find && window.find(this.value)"><a class="secondary-button" href="{{ route('devices.show',$setup->device) }}">Open device diagnostics</a>@if($setup->mode!=='setup_helper')<a class="secondary-button" href="{{ $helperUrl }}">Download authenticated {{ $setup->computer_os==='macos'?'macOS shell':'Windows PowerShell' }} helper</a>@endif<a class="secondary-button" href="{{ route('setup.index') }}">Save and exit</a></div>
+                <div class="mt-4 flex flex-wrap gap-3"><input id="step-search" class="field-input max-w-lg" type="search" placeholder="Search this page…" oninput="window.find && window.find(this.value)"><a class="secondary-button" href="{{ route('devices.show',$setup->device) }}">Open device diagnostics</a>@if($setup->status==='in_progress' && $setup->mode!=='setup_helper')<a class="secondary-button" href="{{ $helperUrl }}">Download authenticated {{ $setup->computer_os==='macos'?'macOS shell':'Windows PowerShell' }} helper</a>@endif<a class="secondary-button" href="{{ route('setup.index') }}">Save and exit</a></div>
+                @if($setup->status === 'in_progress')
+                    <details class="mt-5 rounded-2xl border border-slate-200 p-4">
+                        <summary class="cursor-pointer font-bold text-slate-800">I selected the wrong computer or phone family</summary>
+                        <p class="mt-2 text-sm text-slate-600">Start again at step 1 with the correct instructions. The current session is marked Cancelled and remains in history; it is not deleted.</p>
+                        <form class="mt-4 grid gap-3 md:grid-cols-3" method="post" action="{{ route('setup.restart',$setup) }}">@csrf
+                            <label class="field-label">Setup computer<select class="field-input" name="computer_os"><option value="windows" @selected($setup->computer_os==='windows')>Windows PC</option><option value="macos" @selected($setup->computer_os==='macos')>Apple Mac</option></select></label>
+                            <label class="field-label">Phone family<select class="field-input" name="brand_group">@foreach(\App\Services\SetupInstructionCatalog::BRANDS as $value=>$label)<option value="{{ $value }}" @selected($setup->brand_group===$value)>{{ $label }}</option>@endforeach</select></label>
+                            <label class="field-label">Guidance mode<select class="field-input" name="mode"><option value="setup_helper" @selected($setup->mode==='setup_helper')>Setup Helper — recommended</option><option value="manual_guided" @selected($setup->mode==='manual_guided')>Manual Guided</option></select></label>
+                            <label class="flex gap-2 text-sm md:col-span-3"><input type="checkbox" name="confirmed" value="1" required> I understand the new session starts at step 1 and the current session will be kept as Cancelled.</label>
+                            <div class="md:col-span-3"><button class="secondary-button">Restart with these selections</button></div>
+                        </form>
+                    </details>
+                @endif
             </section>
         </main>
 
@@ -201,6 +242,17 @@
     </div>
 </div>
 <script>
+window.copySetupText = async (id, button) => {
+    const text = document.getElementById(id)?.innerText || '';
+    try {
+        if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
+        else {
+            const area = document.createElement('textarea'); area.value = text; area.style.position = 'fixed'; area.style.opacity = '0';
+            document.body.appendChild(area); area.select(); document.execCommand('copy'); area.remove();
+        }
+        button.textContent = 'Copied ✓';
+    } catch (_) { button.textContent = 'Select and copy manually'; }
+};
 document.addEventListener('DOMContentLoaded', () => {
     const result = document.getElementById('command-result');
     const expectedCard = document.getElementById('expected-result-card');

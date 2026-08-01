@@ -10,6 +10,7 @@ use App\Services\AuditService;
 use App\Services\DeviceGuardApkSettings;
 use App\Services\SetupInstructionCatalog;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -107,6 +108,7 @@ class DeviceSetupController extends Controller
     {
         $this->tenant($request, $setup);
         abort_unless($request->user()->canShop('setup.manage'), 403);
+        abort_unless($setup->status === 'in_progress', 422, 'This setup session is read-only because it is no longer in progress.');
         $steps = $this->visibleSteps($setup, $this->catalog->for($setup->computer_os, $setup->brand_group));
         $data = $request->validate([
             'step_key' => ['required', 'string'],
@@ -219,15 +221,57 @@ class DeviceSetupController extends Controller
     {
         abort_unless($request->hasValidSignature(), 403);
         $this->tenant($request, $setup);
+        abort_unless($request->user()->canShop('setup.manage'), 403);
+        abort_unless($setup->status === 'in_progress', 410, 'This setup helper link is no longer active.');
         abort_unless($os === $setup->computer_os, 403);
         $url = $this->apk->url();
         $checksum = $this->apk->checksum();
+        $toolsPrefix = $os === 'macos' ? 'macos' : 'windows';
+        $toolsUrl = SystemSetting::value($toolsPrefix.'_platform_tools_url') ?: SetupInstructionCatalog::platformToolsUrl($os);
+        $toolsChecksum = SystemSetting::value($toolsPrefix.'_platform_tools_checksum');
         $script = $os === 'macos'
-            ? $this->macScript($url, $checksum)
-            : $this->windowsScript($url, $checksum, SystemSetting::value('windows_platform_tools_url'), SystemSetting::value('windows_platform_tools_checksum'));
+            ? $this->macScript($url, $checksum, $toolsUrl, $toolsChecksum)
+            : $this->windowsScript($url, $checksum, $toolsUrl, $toolsChecksum);
 
         return response($script)->header('Content-Type', 'text/plain')
             ->header('Content-Disposition', 'attachment; filename="deviceguard-setup.'.($os === 'macos' ? 'sh' : 'ps1').'"');
+    }
+
+    public function restart(Request $request, DeviceSetupSession $setup, AuditService $audit)
+    {
+        $this->tenant($request, $setup);
+        abort_unless($request->user()->canShop('setup.manage'), 403);
+        abort_unless($setup->status === 'in_progress', 422, 'Only an in-progress setup can be restarted.');
+        $data = $request->validate([
+            'computer_os' => ['required', 'in:macos,windows'],
+            'brand_group' => ['required', 'in:'.implode(',', array_keys(SetupInstructionCatalog::BRANDS))],
+            'mode' => ['required', 'in:manual_guided,setup_helper'],
+            'confirmed' => ['accepted'],
+        ]);
+
+        $newSetup = DB::transaction(function () use ($setup, $data, $request) {
+            $setup->update(['status' => 'cancelled']);
+
+            return DeviceSetupSession::create([
+                'uuid' => (string) Str::uuid(),
+                'shop_id' => $setup->shop_id,
+                'device_id' => $setup->device_id,
+                'started_by' => $request->user()->id,
+                'computer_os' => $data['computer_os'],
+                'brand_group' => $data['brand_group'],
+                'mode' => $data['mode'],
+                'current_step' => 1,
+                'status' => 'in_progress',
+                'context' => [],
+            ]);
+        });
+        $audit->record('SETUP_RESTARTED', 'Setup restarted with a corrected computer or phone environment', $request->user(), $setup->device, [
+            'setup_id' => $setup->id, 'computer_os' => $setup->computer_os, 'brand_group' => $setup->brand_group,
+        ], [
+            'setup_id' => $newSetup->id, 'computer_os' => $newSetup->computer_os, 'brand_group' => $newSetup->brand_group,
+        ]);
+
+        return redirect()->route('setup.show', $newSetup)->with('success', 'A new setup was started with the corrected environment. The previous progress remains in history.');
     }
 
     private function visibleSteps(DeviceSetupSession $setup, $steps)
@@ -304,13 +348,37 @@ class DeviceSetupController extends Controller
         abort_unless($request->user()->isSuperAdmin() || $session->shop_id === $request->user()->shop_id, 403);
     }
 
-    private function macScript(string $url, ?string $checksum): string
+    private function macScript(string $url, ?string $checksum, string $toolsUrl, ?string $toolsChecksum): string
     {
         $checksumVerification = $checksum
             ? 'echo '.escapeshellarg($checksum)."  deviceguard.apk | shasum -a 256 -c -\n"
             : "printf 'WARNING: APK checksum verification is not configured by Super Admin.\\n'\n";
+        $toolsChecksumVerification = $toolsChecksum
+            ? 'echo '.escapeshellarg(strtolower($toolsChecksum))."  \"\$TOOLS_ZIP\" | shasum -a 256 -c -\n"
+            : "printf 'WARNING: Platform Tools checksum is not configured; using the approved Google HTTPS source.\\n'\n";
+        $package = $this->apk->packageName();
+        $receiver = $this->apk->receiver();
 
-        return "#!/bin/sh\nset -eu\nprintf 'AUTHORIZED setup only. Type YES to continue: '; read ok; [ \"\$ok\" = YES ] || exit 1\nif command -v adb >/dev/null 2>&1; then echo ADB_FOUND; else echo ADB_NOT_FOUND; command -v brew >/dev/null || { echo 'Install official Platform Tools first.'; exit 2; }; brew install android-platform-tools; fi\nadb version\nadb kill-server; adb start-server; adb devices\nadb shell pm list users\nadb shell dumpsys account | grep 'Account {' || echo NO_ACCOUNTS\ncd ~/Downloads\ncurl -L \\\n\"{$url}\" \\\n-o deviceguard.apk\nls -lh deviceguard.apk\n{$checksumVerification}adb install -r -t deviceguard.apk\nadb shell pm path {$this->apk->packageName()}\nadb shell dumpsys package {$this->apk->packageName()} | grep DevicePolicyReceiver\nprintf 'Checks clean and Device Owner authorized? Type SET-OWNER: '; read own; [ \"\$own\" = SET-OWNER ] || exit 0\nadb shell dpm set-device-owner {$this->apk->receiver()}\nadb shell dumpsys device_policy\nadb shell monkey -p {$this->apk->packageName()} -c android.intent.category.LAUNCHER 1\nprintf 'HELPER_RESULT: commands finished. Android and server verification are still required in the wizard.\\n'\n";
+        return "#!/bin/sh\nset -eu\n".
+            "printf '\\nDeviceGuard guided macOS helper\\nThis helper never resets the phone or bypasses Android security.\\n\\n'\n".
+            "printf 'Before continuing: backup is complete, the phone has no accounts, USB debugging is on, and one phone is connected.\\nType YES to confirm: '; read ok; [ \"\$ok\" = YES ] || exit 1\n".
+            "if ! command -v adb >/dev/null 2>&1; then\n".
+            "  printf '\\n[1/7] Installing official Android Platform Tools (Homebrew is not required)...\\n'\n".
+            "  TOOLS_ROOT=\"\$HOME/deviceguard-tools\"; TOOLS_ZIP=\"\$TOOLS_ROOT/platform-tools.zip\"; mkdir -p \"\$TOOLS_ROOT\"\n".
+            '  curl --fail --location '.escapeshellarg($toolsUrl)." --output \"\$TOOLS_ZIP\"\n".
+            "  {$toolsChecksumVerification}  rm -rf \"\$TOOLS_ROOT/platform-tools\"; ditto -x -k \"\$TOOLS_ZIP\" \"\$TOOLS_ROOT\"; chmod +x \"\$TOOLS_ROOT/platform-tools/adb\"\n".
+            "  PATH_LINE='export PATH=\"\$HOME/deviceguard-tools/platform-tools:\$PATH\"'; touch \"\$HOME/.zprofile\"; grep -Fqx \"\$PATH_LINE\" \"\$HOME/.zprofile\" || printf '%s\\n' \"\$PATH_LINE\" >> \"\$HOME/.zprofile\"\n".
+            "  export PATH=\"\$HOME/deviceguard-tools/platform-tools:\$PATH\"\n".
+            "else printf '\\n[1/7] ADB_FOUND\\n'; fi\n".
+            "adb version\n".
+            "printf '\\n[2/7] Checking the connected phone...\\n'\nadb kill-server >/dev/null; adb start-server >/dev/null\n".
+            "ROWS=\"\$(adb devices | sed '1d' | sed '/^[[:space:]]*\$/d')\"\nCOUNT=\$(printf '%s\\n' \"\$ROWS\" | grep -c . || true)\n[ \"\$COUNT\" -eq 1 ] || { printf 'STOP: Connect exactly one Android phone. Found %s.\\n' \"\$COUNT\"; adb devices; exit 3; }\nprintf '%s\\n' \"\$ROWS\" | grep -Eq '[[:space:]]device\$' || { printf 'STOP: Unlock the phone and accept the USB debugging fingerprint, then run the helper again.\\n'; adb devices; exit 4; }\n".
+            "printf '\\n[3/7] Checking Android users and accounts...\\n'\nUSERS=\"\$(adb shell pm list users)\"; printf '%s\\n' \"\$USERS\"\nUSER_COUNT=\$(printf '%s\\n' \"\$USERS\" | grep -c 'UserInfo{' || true)\n[ \"\$USER_COUNT\" -eq 1 ] && printf '%s\\n' \"\$USERS\" | grep -q 'UserInfo{0:' || { printf 'STOP: Android must contain only primary user 0. Remove extra users manually or repeat the authorized reset.\\n'; exit 5; }\n".
+            "if adb shell dumpsys account | grep -q 'Account {'; then printf 'STOP: Remove every Google/manufacturer account in phone Settings, then run the helper again.\\n'; exit 6; else echo NO_ACCOUNTS; fi\n".
+            "printf '\\n[4/7] Downloading and verifying DeviceGuard...\\n'\ncd \"\$HOME/Downloads\"\ncurl --fail --location ".escapeshellarg($url)." --output deviceguard.apk\n[ -s deviceguard.apk ] || { echo 'STOP: DeviceGuard APK download is empty.'; exit 7; }\n{$checksumVerification}".
+            "printf '\\n[5/7] Installing DeviceGuard...\\n'\nadb install -r -t deviceguard.apk\nadb shell pm path {$package} | grep -q '^package:' || { echo 'STOP: DeviceGuard package verification failed.'; exit 8; }\nadb shell dumpsys package {$package} | grep -q DevicePolicyReceiver || { echo 'STOP: Device Admin receiver is missing.'; exit 9; }\n".
+            "printf '\\n[6/7] Device Owner is the sensitive final computer action.\\nType SET-OWNER only after the wizard confirms authorization, primary user 0, and no accounts: '; read own; [ \"\$own\" = SET-OWNER ] || { echo 'Stopped safely before Device Owner assignment.'; exit 0; }\nadb shell dpm set-device-owner {$receiver}\nadb shell dumpsys device_policy | grep -q '{$package}' || { echo 'STOP: Android did not confirm DeviceGuard as Device Owner.'; exit 10; }\n".
+            "printf '\\n[7/7] Opening DeviceGuard...\\n'\nadb shell monkey -p {$package} -c android.intent.category.LAUNCHER 1 >/dev/null\nprintf '\\nHELPER_RESULT: Local checks passed. Return to the browser wizard for activation, server checks, lock/unlock, reboot, and USB-debugging cleanup.\\n'\n";
     }
 
     private function windowsScript(string $url, ?string $checksum, ?string $toolsUrl, ?string $toolsChecksum): string
@@ -321,6 +389,31 @@ class DeviceSetupController extends Controller
             ? "if ((Get-FileHash .\\deviceguard.apk -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($checksum)."') { throw 'APK checksum mismatch' }\n"
             : "Write-Warning 'APK checksum verification is not configured by Super Admin.'\n";
 
-        return "\$ErrorActionPreference='Stop'\nif ((Read-Host 'AUTHORIZED setup only. Type YES to continue') -ne 'YES') { exit 1 }\nif ((Get-Command adb -ErrorAction SilentlyContinue) -or (Test-Path 'C:\\platform-tools\\adb.exe')) { Write-Host ADB_FOUND } else { Write-Host ADB_NOT_FOUND\n".($toolsUrl && $toolsChecksum ? "Invoke-WebRequest -Uri '$toolsUrl' -OutFile platform-tools.zip\nif ((Get-FileHash platform-tools.zip -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($toolsChecksum)."') { throw 'Platform Tools checksum mismatch' }\nExpand-Archive platform-tools.zip C:\\ -Force\n" : "throw 'Configure the official Platform Tools URL and SHA-256 in Super Admin settings.'\n")."}\nSet-Location C:\\platform-tools\n.\\adb.exe version\n.\\adb.exe kill-server; .\\adb.exe start-server; .\\adb.exe devices\n.\\adb.exe shell pm list users\n.\\adb.exe shell dumpsys account | Select-String 'Account \\{'\nInvoke-WebRequest `\n-Uri \"{$url}\" `\n-OutFile \".\\deviceguard.apk\"\nGet-Item .\\deviceguard.apk |\nSelect-Object Name, Length, LastWriteTime\n{$checksumVerification}.\\adb.exe install -r -t .\\deviceguard.apk\n.\\adb.exe shell pm path {$this->apk->packageName()}\n.\\adb.exe shell dumpsys package {$this->apk->packageName()} | Select-String DevicePolicyReceiver\nif ((Read-Host 'Checks clean and Device Owner authorized? Type SET-OWNER') -eq 'SET-OWNER') { .\\adb.exe shell dpm set-device-owner {$this->apk->receiver()}; .\\adb.exe shell dumpsys device_policy; .\\adb.exe shell monkey -p {$this->apk->packageName()} -c android.intent.category.LAUNCHER 1 }\nWrite-Host 'HELPER_RESULT: commands finished. Android and server verification are still required in the wizard.'\n";
+        $toolsChecksumVerification = $toolsChecksum
+            ? "if ((Get-FileHash \$toolsZip -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($toolsChecksum)."') { throw 'Platform Tools checksum mismatch. Delete the ZIP and stop.' }\n"
+            : "Write-Warning 'Platform Tools checksum is not configured; using the approved Google HTTPS source.'\n";
+        $package = $this->apk->packageName();
+        $receiver = $this->apk->receiver();
+
+        return "\$ErrorActionPreference = 'Stop'\n[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n".
+            "Write-Host \"`nDeviceGuard guided Windows helper`nThis helper never resets the phone or bypasses Android security.`n\"\n".
+            "if ((Read-Host 'Before continuing: backup is complete, the phone has no accounts, USB debugging is on, and one phone is connected. Type YES') -ne 'YES') { exit 1 }\n".
+            "if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {\n".
+            "  Write-Host \"`n[1/7] Installing official Android Platform Tools (administrator access is not required)...\"\n".
+            "  \$toolsRoot = Join-Path \$env:LOCALAPPDATA 'DeviceGuard'; \$toolsDir = Join-Path \$toolsRoot 'platform-tools'; \$toolsZip = Join-Path \$toolsRoot 'platform-tools.zip'\n".
+            "  New-Item -ItemType Directory -Force -Path \$toolsRoot | Out-Null\n".
+            "  Invoke-WebRequest -UseBasicParsing -Uri '".str_replace("'", "''", (string) $toolsUrl)."' -OutFile \$toolsZip\n{$toolsChecksumVerification}".
+            "  if (Test-Path \$toolsDir) { Remove-Item \$toolsDir -Recurse -Force }; Expand-Archive \$toolsZip \$toolsRoot -Force\n".
+            "  if (-not (Test-Path (Join-Path \$toolsDir 'adb.exe'))) { throw 'adb.exe was not found after extraction.' }\n".
+            "  \$env:Path = \"\$toolsDir;\$env:Path\"\n".
+            "  \$userPath = [string][Environment]::GetEnvironmentVariable('Path', 'User'); if ((\$userPath -split ';') -notcontains \$toolsDir) { \$newPath = if ([string]::IsNullOrWhiteSpace(\$userPath)) { \$toolsDir } else { \$userPath.TrimEnd(';') + ';' + \$toolsDir }; [Environment]::SetEnvironmentVariable('Path', \$newPath, 'User') }\n".
+            "} else { Write-Host \"`n[1/7] ADB_FOUND\" }\nadb version\n".
+            "Write-Host \"`n[2/7] Checking the connected phone...\"\nadb kill-server | Out-Null; adb start-server | Out-Null\n".
+            "\$deviceRows = @(adb devices | Select-Object -Skip 1 | Where-Object { \$_.Trim() -ne '' })\nif (\$deviceRows.Count -ne 1) { adb devices; throw \"Connect exactly one Android phone. Found \$(\$deviceRows.Count).\" }\nif (\$deviceRows[0] -notmatch '\\sdevice\$') { adb devices; throw 'Unlock the phone and accept the USB debugging fingerprint, then run the helper again.' }\n".
+            "Write-Host \"`n[3/7] Checking Android users and accounts...\"\n\$users = @(adb shell pm list users); \$users | Write-Host\n\$userRows = @(\$users | Select-String 'UserInfo\\{')\nif (\$userRows.Count -ne 1 -or \$userRows[0].Line -notmatch 'UserInfo\\{0:') { throw 'Android must contain only primary user 0. Remove extra users manually or repeat the authorized reset.' }\nif (adb shell dumpsys account | Select-String 'Account \\{') { throw 'Remove every Google/manufacturer account in phone Settings, then run the helper again.' } else { Write-Host NO_ACCOUNTS }\n".
+            "Write-Host \"`n[4/7] Downloading and verifying DeviceGuard...\"\nSet-Location (Join-Path \$HOME 'Downloads')\nInvoke-WebRequest -UseBasicParsing `\n-Uri \"{$url}\" `\n-OutFile \".\\deviceguard.apk\"\nif (-not (Test-Path .\\deviceguard.apk) -or (Get-Item .\\deviceguard.apk).Length -le 0) { throw 'DeviceGuard APK download is empty.' }\n{$checksumVerification}".
+            "Write-Host \"`n[5/7] Installing DeviceGuard...\"\nadb install -r -t .\\deviceguard.apk\nif (-not (adb shell pm path {$package} | Select-String '^package:')) { throw 'DeviceGuard package verification failed.' }\nif (-not (adb shell dumpsys package {$package} | Select-String DevicePolicyReceiver)) { throw 'Device Admin receiver is missing.' }\n".
+            "Write-Host \"`n[6/7] Device Owner is the sensitive final computer action.\"\nif ((Read-Host 'Type SET-OWNER only after the wizard confirms authorization, primary user 0, and no accounts') -ne 'SET-OWNER') { Write-Host 'Stopped safely before Device Owner assignment.'; exit 0 }\nadb shell dpm set-device-owner {$receiver}\nif (-not (adb shell dumpsys device_policy | Select-String '{$package}')) { throw 'Android did not confirm DeviceGuard as Device Owner.' }\n".
+            "Write-Host \"`n[7/7] Opening DeviceGuard...\"\nadb shell monkey -p {$package} -c android.intent.category.LAUNCHER 1 | Out-Null\nWrite-Host \"`nHELPER_RESULT: Local checks passed. Return to the browser wizard for activation, server checks, lock/unlock, reboot, and USB-debugging cleanup.\"\n";
     }
 }

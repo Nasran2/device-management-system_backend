@@ -291,6 +291,46 @@ class DeviceManagementTest extends TestCase
         $this->assertNotNull($device->fresh()->management_pin_locked_until);
     }
 
+    public function test_verified_management_pin_can_request_a_one_time_signed_permanent_release(): void
+    {
+        $device = $this->device($this->user(), ['status' => 'locked', 'lock_status' => 'locked', 'management_pin_hash' => Hash::make('9876'), 'management_pin_encrypted' => Crypt::encryptString('9876')]);
+        $token = 'management-pin-release-device-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $token)]);
+
+        $authorization = $this->withToken($token)->postJson('/api/v1/device/management-pin/verify', [
+            'pin' => '9876',
+            'purpose' => 'PERMANENT_RELEASE',
+        ])->assertOk()->json('authorization_token');
+
+        $this->withToken($token)->postJson('/api/v1/device/management-pin/release', [
+            'authorization_token' => $authorization,
+        ])->assertOk()->assertJsonPath('success', true);
+
+        $command = $device->commands()->where('type', 'PERMANENT_RELEASE')->firstOrFail();
+        $this->assertNull($command->requested_by);
+        $this->assertSame('management_pin', $command->payload['authorization_method']);
+        $this->assertTrue(app(CommandService::class)->verify($command));
+
+        $this->withToken($token)->postJson('/api/v1/device/management-pin/release', [
+            'authorization_token' => $authorization,
+        ])->assertForbidden()->assertJsonPath('success', false);
+    }
+
+    public function test_management_pin_token_for_another_purpose_cannot_release_device(): void
+    {
+        $device = $this->device($this->user(), ['status' => 'active_unlocked', 'management_pin_hash' => Hash::make('9876'), 'management_pin_encrypted' => Crypt::encryptString('9876')]);
+        $token = 'wrong-purpose-release-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $token)]);
+        $authorization = $this->withToken($token)->postJson('/api/v1/device/management-pin/verify', [
+            'pin' => '9876', 'purpose' => 'VIEW_MANAGEMENT_SETUP',
+        ])->assertOk()->json('authorization_token');
+
+        $this->withToken($token)->postJson('/api/v1/device/management-pin/release', [
+            'authorization_token' => $authorization,
+        ])->assertForbidden();
+        $this->assertDatabaseMissing('device_commands', ['device_id' => $device->id, 'type' => 'PERMANENT_RELEASE']);
+    }
+
     public function test_management_pin_secrets_are_hidden_from_model_json_and_audit_logs(): void
     {
         $device = $this->device($this->user(), ['management_pin_hash' => Hash::make('9876'), 'management_pin_encrypted' => Crypt::encryptString('9876')]);

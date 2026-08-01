@@ -9,6 +9,10 @@ use Illuminate\Support\Facades\DB;
 
 class SetupInstructionCatalog
 {
+    public const WINDOWS_PLATFORM_TOOLS_URL = 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip';
+
+    public const MACOS_PLATFORM_TOOLS_URL = 'https://dl.google.com/android/repository/platform-tools-latest-darwin.zip';
+
     public const OSES = ['windows' => 'Windows', 'macos' => 'macOS'];
 
     public const BRANDS = [
@@ -30,6 +34,7 @@ class SetupInstructionCatalog
         if (! DeviceSetupInstruction::where('computer_os', $os)->where('phone_brand', $brand)->exists()) {
             $this->syncDefaults($os, $brand);
         }
+        $this->refreshSystemManagedDefaults($os, $brand);
         $this->refreshApkInstallInstruction($os, $brand);
 
         return DeviceSetupInstruction::where('computer_os', $os)
@@ -66,6 +71,28 @@ class SetupInstructionCatalog
         };
     }
 
+    public static function platformToolsUrl(string $os): string
+    {
+        return $os === 'windows' ? self::WINDOWS_PLATFORM_TOOLS_URL : self::MACOS_PLATFORM_TOOLS_URL;
+    }
+
+    private function refreshSystemManagedDefaults(string $os, string $brand): void
+    {
+        foreach ($this->defaults($os, $brand) as $default) {
+            $current = DeviceSetupInstruction::where('computer_os', $os)
+                ->where('phone_brand', $brand)
+                ->where('step_key', $default['step_key'])
+                ->whereNull('updated_by')
+                ->first();
+            if ($current) {
+                $current->fill(collect($default)->except(['computer_os', 'phone_brand', 'created_by', 'updated_by'])->all());
+                if ($current->isDirty()) {
+                    $current->save();
+                }
+            }
+        }
+    }
+
     private function refreshApkInstallInstruction(string $os, string $brand): void
     {
         $current = DeviceSetupInstruction::where('computer_os', $os)
@@ -99,16 +126,18 @@ class SetupInstructionCatalog
     private function defaults(string $os, string $brand): array
     {
         $isWin = $os === 'windows';
-        $adb = $isWin ? '.\adb.exe' : 'adb';
+        $adb = 'adb';
         $shell = $isWin ? 'PowerShell' : 'Terminal (zsh)';
-        $folder = $isWin ? 'C:\platform-tools' : 'Any folder after Android Platform Tools is on PATH';
+        $folder = $isWin ? 'Any PowerShell window after Platform Tools setup' : 'Any Terminal window after Platform Tools setup';
         $apkUrl = $this->apk->url();
         $apkChecksum = $this->apk->checksum();
-        $toolsUrl = SystemSetting::value('windows_platform_tools_url') ?: 'https://developer.android.com/tools/releases/platform-tools';
+        $toolsSettingPrefix = $isWin ? 'windows' : 'macos';
+        $toolsUrl = SystemSetting::value($toolsSettingPrefix.'_platform_tools_url') ?: self::platformToolsUrl($os);
+        $toolsChecksum = SystemSetting::value($toolsSettingPrefix.'_platform_tools_checksum');
         $brandName = self::BRANDS[$brand];
         $brandGuide = $this->brandGuide($brand);
         $commonAdbErrors = [
-            $this->error('ADB_NOT_FOUND / command not recognized', 'Android Platform Tools is missing or this terminal is not running in its folder.', 'Install the official Platform Tools in the next step. On Windows, open PowerShell in C:\platform-tools; on macOS, ensure adb is on PATH.'),
+            $this->error('ADB_NOT_FOUND / command not recognized', 'Android Platform Tools is missing or this terminal has not reloaded its PATH.', 'Complete the official Platform Tools step. Then close and reopen PowerShell or Terminal and run adb version again.'),
             $this->error('unauthorized', 'The phone has not trusted this computer’s USB debugging fingerprint.', 'Unlock the phone, accept the RSA prompt, reconnect, and run the command again. If needed, revoke USB debugging authorizations in Developer options.'),
             $this->error('offline or no device', 'The cable, USB mode, driver, authorization, or ADB server is not ready.', 'Use a data-capable cable, try another direct USB port, select File transfer, restart ADB, and apply only this brand’s driver guidance.'),
         ];
@@ -126,7 +155,7 @@ class SetupInstructionCatalog
             $this->step('computer_os', 'Identify the setup computer and record its operating system',
                 'The commands and USB driver requirements differ between Windows and macOS.',
                 $isWin ? 'Windows PowerShell' : 'Apple menu and Terminal',
-                $isWin ? ['Open Start, search for PowerShell, and choose Windows PowerShell.', 'Run the command below.', 'Confirm Caption, Version, and OSArchitecture are displayed.'] : ['Open Apple menu › About This Mac and note the macOS version.', 'Open Terminal from Applications › Utilities.', 'Run the command below and confirm the version.'],
+                $isWin ? ['Click Start, type PowerShell, and open Windows PowerShell. Do not use Command Prompt for PowerShell commands.', 'Copy the complete command block with the Copy command button.', 'Click once inside PowerShell, right-click to paste, then press Enter.', 'Confirm Caption, Version, and OSArchitecture are displayed.'] : ['Open Apple menu › About This Mac and note the macOS version.', 'Press Command + Space, type Terminal, and press Return.', 'Copy the complete command block, paste it into Terminal with Command + V, then press Return.', 'Confirm ProductName, ProductVersion, and BuildVersion are displayed.'],
                 $isWin ? 'Windows edition, version, and 64-bit/32-bit architecture are displayed.' : 'A macOS product version such as 14.x or 15.x is displayed.',
                 [$this->error('Command unavailable', 'The selected setup computer does not match the OS chosen for this session.', 'Return to setup history and start the correct OS variant, or open the correct terminal application.')],
                 ['Operating system matches this wizard', 'Version and architecture recorded'],
@@ -135,37 +164,40 @@ class SetupInstructionCatalog
             $this->step('adb_check', 'Check whether Android Debug Bridge (ADB) is already available',
                 'ADB is required for USB detection, APK installation, Device Owner assignment, and verification.',
                 $shell,
-                $isWin ? ['Open PowerShell.', 'Paste the detection command.', 'Record exactly ADB_FOUND or ADB_NOT_FOUND.', 'If ADB_FOUND, the installation step will be skipped.'] : ['Open Terminal.', 'Paste the detection command.', 'Record exactly ADB_FOUND or ADB_NOT_FOUND.', 'If ADB_FOUND, the installation step will be skipped.'],
+                $isWin ? ['Open PowerShell from Start.', 'Copy and paste the complete detection command, then press Enter.', 'Select exactly the result shown: ADB_FOUND or ADB_NOT_FOUND.', 'If ADB_FOUND, the installation step is skipped and every later command uses adb from PATH.'] : ['Open Terminal with Command + Space, type Terminal, and press Return.', 'Copy and paste the complete detection command, then press Return.', 'Select exactly the result shown: ADB_FOUND or ADB_NOT_FOUND.', 'If ADB_FOUND, the installation step is skipped and every later command uses adb from PATH.'],
                 'The command prints exactly ADB_FOUND or ADB_NOT_FOUND.',
                 $commonAdbErrors,
                 ['Detection result recorded', 'ADB installation is not repeated when already available'],
-                [], $shell, $isWin ? "if (Get-Command adb -ErrorAction SilentlyContinue) { 'ADB_FOUND' } elseif (Test-Path 'C:\\platform-tools\\adb.exe') { 'ADB_FOUND' } else { 'ADB_NOT_FOUND' }" : 'if command -v adb >/dev/null 2>&1; then echo ADB_FOUND; else echo ADB_NOT_FOUND; fi', $isWin ? 'Any PowerShell folder' : 'Any Terminal folder', false, 'adb_detection'),
+                [], $shell, $isWin ? "if (Get-Command adb -ErrorAction SilentlyContinue) { 'ADB_FOUND' } else { 'ADB_NOT_FOUND' }" : 'if command -v adb >/dev/null 2>&1; then echo ADB_FOUND; else echo ADB_NOT_FOUND; fi', $isWin ? 'Any PowerShell folder' : 'Any Terminal folder', false, 'adb_detection'),
 
             $this->step('adb_install', 'Install official Android Platform Tools only when ADB is missing',
                 'Using Google’s official tools avoids modified ADB binaries and provides the commands required by the remaining steps.',
-                $isWin ? 'Web browser, C:\platform-tools, then PowerShell' : 'Terminal',
-                $isWin ? ["Open the configured official Platform Tools link: {$toolsUrl}", 'Download the Windows ZIP and verify the configured SHA-256 when one is provided.', 'Extract it so adb.exe is located at C:\platform-tools\adb.exe.', 'Open PowerShell in C:\platform-tools.', 'Run the version command. Optionally add this folder to PATH for this PowerShell window only.'] : ['If ADB_NOT_FOUND, install Android Platform Tools using the approved method: brew install android-platform-tools.', 'If Homebrew is unavailable, use Google’s official Platform Tools download; do not install an unofficial package.', 'Run the version command.'],
+                $shell,
+                $isWin
+                    ? ["Keep PowerShell open. The command downloads Google Platform Tools from: {$toolsUrl}", 'Copy the entire command block, paste it once, and press Enter. It installs under your Windows user profile and does not require an administrator account.', 'If a checksum is configured, the command stops automatically when it does not match.', 'Wait for Android Debug Bridge version to appear.', 'Close and reopen PowerShell after this step so the saved PATH is available in future windows.']
+                    : ["Keep Terminal open. The command downloads Google Platform Tools from: {$toolsUrl}", 'Copy the entire command block, paste it once, and press Return. Homebrew is not required.', 'If a checksum is configured, the command stops automatically when it does not match.', 'The tools are installed in ~/deviceguard-tools/platform-tools and safely added to ~/.zprofile.', 'Wait for Android Debug Bridge version to appear, then close and reopen Terminal.'],
                 'Android Debug Bridge version information is displayed. Do not continue if the archive checksum mismatches.',
                 [$this->error('Checksum mismatch', 'The downloaded archive is corrupted or not the approved file.', 'Delete the archive, download again from the configured official URL, and compare the SHA-256. Stop if it still differs.'), $commonAdbErrors[0]],
-                ['Official source used', 'Checksum verified when configured', 'ADB version displayed'],
-                [], $shell, $isWin ? ".\\adb.exe version\n# Optional for this PowerShell window only:\n\$env:Path = 'C:\\platform-tools;' + \$env:Path" : 'adb version', $folder),
+                ['Official Google HTTPS source used', 'Checksum verified automatically when configured', 'ADB version displayed', 'PowerShell or Terminal reopened after installation'],
+                [], $shell, $this->platformToolsInstallCommand($isWin, $toolsUrl, $toolsChecksum), $isWin ? 'Any PowerShell folder' : 'Any Terminal folder'),
 
             $isWin
                 ? $this->step('usb_driver', "Install or verify the official {$brandName} Windows USB driver",
                     'Windows may require a manufacturer USB driver before ADB can identify the phone. macOS never receives this step.',
                     'Manufacturer support site and Windows Device Manager',
-                    [$brandGuide['driver'], 'Install a driver only from the manufacturer’s official support site.', 'Connect the phone with a data-capable cable.', 'Open Device Manager and confirm the phone/Android ADB interface has no warning icon.', 'Run the PowerShell device check below.'],
+                    ['Open Google’s official OEM USB driver directory: https://developer.android.com/studio/run/oem-usb', $brandGuide['driver'], 'Install a driver only from the manufacturer’s official support site linked by Google or from the manufacturer itself.', 'Connect the phone with a data-capable cable.', 'Right-click Start, choose Device Manager, and expand Portable Devices, Android Device, or Other devices.', 'Confirm the phone/Android ADB interface has no yellow warning icon, then run the PowerShell check below.'],
                     'A phone or Android ADB interface appears without an Unknown device or warning icon.',
                     [$this->error('Unknown USB device / warning icon', 'Windows has no suitable driver, the cable is power-only, or the USB mode is wrong.', 'Reconnect using a data cable, choose File transfer, install only the official manufacturer driver, then rescan hardware.'), $this->error('No matching PnP device', 'Windows has not enumerated the connected phone.', 'Try another direct USB port and cable, unlock the phone, then check Device Manager again.')],
                     ['Official driver guidance followed', 'No Device Manager warning icon', 'Windows detects the phone'],
                     [], $shell, "Get-PnpDevice | Where-Object { \$_.FriendlyName -match 'Android|ADB|{$brandName}' } | Format-Table Status, Class, FriendlyName", 'Any PowerShell folder')
-                : $this->step('phone_preparation', "Prepare the {$brandName} phone for a clean Device Owner setup",
-                    'Android permits Device Owner assignment only on an eligible, unprovisioned device with no conflicting accounts or users.',
-                    "{$brandName} phone",
-                    ['Disconnect the phone from the Mac.', $brandGuide['reset'], 'After reset, begin Android setup without restoring a backup.', 'Do not add a Google account or manufacturer account.', 'Stop on the home screen once the minimal offline setup is complete.'],
-                    'The phone is at the home screen with no restored accounts and no secondary user.',
-                    [$this->error('Google or manufacturer account was added', 'The phone is no longer in the required clean enrollment state.', 'Remove the account manually if Android permits Device Owner afterward; otherwise obtain authorization and factory-reset again.'), $this->error('Restore started automatically', 'Backup restore may add accounts or policies that block Device Owner.', 'Cancel restore. If content was restored, reset again with authorization and select Set up as new.')],
-                    ['Factory reset performed manually when required', 'No backup restored', 'No accounts added']),
+                : $this->step('mac_usb_preflight', 'Prepare the Mac, USB cable, and direct connection',
+                    'macOS does not need an Android USB driver, but charge-only cables, hubs, accessory restrictions, and damaged adapters can prevent detection.',
+                    'Mac, USB cable, and phone',
+                    ['Use a known data-capable USB cable, not a charge-only cable.', 'Connect the phone directly to the Mac when possible; avoid an unpowered hub.', 'Unlock the phone. If macOS asks to allow the USB accessory, choose Allow.', 'On the phone choose File transfer / Android Auto when the USB-use menu appears.', 'Run the USB report command and look for the phone manufacturer or an Android device.'],
+                    'The phone appears in the Mac USB report. No Windows driver installation is required.',
+                    [$this->error('Phone is absent from the USB report', 'The cable, adapter, port, hub, or Mac accessory permission is blocking the physical connection.', 'Try a verified data cable and another direct port, remove the hub, unlock the phone, choose File transfer, and approve the accessory prompt.'), $this->error('Phone charges but is not detected', 'The cable may carry power only or the phone is in Charge only mode.', 'Replace the cable and choose File transfer / Android Auto from the phone USB notification.')],
+                    ['Data-capable cable confirmed', 'Direct USB connection used', 'Phone appears in the Mac USB report'],
+                    [], $shell, "system_profiler SPUSBDataType | grep -i -E 'Android|{$brandName}' || echo PHONE_NOT_VISIBLE", 'Any Terminal folder'),
 
             $this->step('factory_reset', "Factory-reset and prepare the {$brandName} phone without accounts",
                 'Device Owner assignment normally requires a clean device with only the system user and no accounts.',
@@ -225,7 +257,7 @@ class SetupInstructionCatalog
                 $shell,
                 array_values(array_filter([
                     "Use only the centrally configured APK URL: {$apkUrl}",
-                    $isWin ? 'Open PowerShell in C:\platform-tools.' : 'Open Terminal and change to ~/Downloads.',
+                    $isWin ? 'Open PowerShell. The command changes safely to your Downloads folder.' : 'Open Terminal. The command changes safely to ~/Downloads.',
                     'Download deviceguard.apk and verify that the file exists and has a size greater than zero.',
                     $apkChecksum
                         ? 'Calculate SHA-256 and compare it with the saved expected checksum before installation.'
@@ -241,7 +273,7 @@ class SetupInstructionCatalog
                     'ADB installation reports Success',
                     'Exact DeviceGuard package path returned',
                 ])),
-                [], $shell, $this->apkInstallCommand($isWin, $apkUrl, $apkChecksum), $isWin ? 'C:\platform-tools' : '~/Downloads'),
+                [], $shell, $this->apkInstallCommand($isWin, $apkUrl, $apkChecksum), $isWin ? 'Windows Downloads folder' : '~/Downloads'),
 
             $this->step('package_receiver', 'Verify the DeviceGuard package and Device Admin receiver',
                 'Device Owner can only be assigned when the exact production package and receiver are installed.',
@@ -308,17 +340,12 @@ class SetupInstructionCatalog
             $this->step('reboot_finish', 'Reboot and verify boot recovery before completing setup',
                 'The final test proves DeviceGuard restarts after boot, preserves Device Owner, reconnects, and resumes offline protection.',
                 "{$shell}, {$brandName} phone, and live server verification",
-                ['Run the reboot command.', 'Wait for Android to boot fully and unlock it once if required by Android encrypted storage.', 'Do not manually launch DeviceGuard; wait for its boot receiver/worker.', 'Inspect boot logs and refresh the server panel.', 'Confirm Device Owner remains true, a new sync arrives, FCM remains present, and offline policy is acknowledged.', 'Complete setup only when every final gate is confirmed.'],
+                ['Run the reboot command.', 'Wait for Android to boot fully and unlock it once if required by Android encrypted storage.', 'Do not manually launch DeviceGuard; wait for its boot receiver/worker.', 'Inspect boot logs and refresh the server panel.', 'Confirm Device Owner remains true, a new sync arrives, FCM remains present, and offline policy is acknowledged.', 'After every check passes, open Developer options on the phone, choose Revoke USB debugging authorizations, and turn USB debugging off.', 'Disconnect the USB cable and complete setup only when every final gate is confirmed.'],
                 'After reboot, DeviceGuard starts automatically, a fresh sync reaches the server, Device Owner/capabilities remain confirmed, and offline policy is acknowledged.',
                 [$this->error('No sync after reboot', 'Boot receiver, background execution, network, or OEM power controls prevented startup.', 'Inspect boot logcat, confirm RECEIVE_BOOT_COMPLETED in the approved APK, recheck brand background/autostart settings, and wait for network.'), $this->error('Device Owner lost', 'The device was reset, app state changed, or the server has not received the current Android report.', 'Run dumpsys device_policy. If DeviceGuard is not owner, stop and diagnose; never mark setup complete.')],
-                ['Reboot completed', 'Boot logs reviewed', 'Fresh post-reboot sync received', 'Device Owner and all final gates confirmed'],
+                ['Reboot completed', 'Boot logs reviewed', 'Fresh post-reboot sync received', 'Device Owner and all final gates confirmed', 'USB debugging authorizations revoked', 'USB debugging turned off and cable disconnected'],
                 [], $shell, "{$adb} reboot\n# After Android boots:\n{$adb} logcat -d -v time | ".($isWin ? "Select-String 'BOOT_COMPLETED|DeviceGuard|WorkManager'" : "grep -E 'BOOT_COMPLETED|DeviceGuard|WorkManager'"), $folder, true, 'final'),
         ];
-
-        // macOS already has a dedicated preparation step; avoid repeating the Windows-only driver slot.
-        if (! $isWin) {
-            array_splice($raw, 5, 1);
-        }
 
         return collect($raw)->values()->map(function (array $step, int $index) use ($os, $brand) {
             return $step + [
@@ -343,7 +370,9 @@ class SetupInstructionCatalog
             'shell_type' => $shell,
             'command' => $command,
             'run_from' => $runFrom,
-            'terminal_help' => $shell ? "Open {$shell}, change to the stated folder when required, paste one command block at a time, and read the full output before continuing." : null,
+            'terminal_help' => $shell ? ($shell === 'PowerShell'
+                ? 'Open Start, type PowerShell, and open Windows PowerShell. Use Copy command above, right-click once in PowerShell to paste, press Enter, and wait for the prompt to return. Do not use Command Prompt.'
+                : 'Press Command + Space, type Terminal, and press Return. Use Copy command above, paste with Command + V, press Return, and wait for the prompt to return.') : null,
             'expected_output' => $expected,
             'possible_errors' => $errors,
             'troubleshooting' => collect($errors)->map(fn ($e) => ['problem' => $e['output'], 'solution' => $e['solution']])->all(),
@@ -362,14 +391,16 @@ class SetupInstructionCatalog
                 ? "\n(Get-FileHash .\\deviceguard.apk -Algorithm SHA256).Hash\n# Compare with saved expected SHA-256: {$checksum}\n"
                 : "\n# APK checksum verification is not configured by Super Admin.\n";
 
-            return "Invoke-WebRequest `\n".
+            return "Set-Location (Join-Path \$HOME 'Downloads')\n".
+                "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\n".
+                "Invoke-WebRequest -UseBasicParsing `\n".
                 "-Uri \"{$url}\" `\n".
                 "-OutFile \".\\deviceguard.apk\"\n\n".
                 "Get-Item .\\deviceguard.apk |\n".
                 "Select-Object Name, Length, LastWriteTime\n".
                 $checksumCommand."\n".
-                ".\\adb.exe install -r -t .\\deviceguard.apk\n\n".
-                ".\\adb.exe shell pm path {$this->apk->packageName()}";
+                "adb install -r -t .\\deviceguard.apk\n\n".
+                "adb shell pm path {$this->apk->packageName()}";
         }
 
         $checksumCommand = $checksum
@@ -384,6 +415,52 @@ class SetupInstructionCatalog
             $checksumCommand."\n".
             "adb install -r -t deviceguard.apk\n\n".
             "adb shell pm path {$this->apk->packageName()}";
+    }
+
+    private function platformToolsInstallCommand(bool $windows, string $url, ?string $checksum): string
+    {
+        if ($windows) {
+            $checksumCheck = $checksum
+                ? "if ((Get-FileHash \$zip -Algorithm SHA256).Hash.ToLower() -ne '".strtolower($checksum)."') { throw 'Platform Tools checksum mismatch. Delete the ZIP and stop.' }"
+                : "Write-Warning 'Platform Tools checksum is not configured; continuing only because the download uses the approved Google HTTPS URL.'";
+
+            return "\$root = Join-Path \$env:LOCALAPPDATA 'DeviceGuard'\n".
+                "\$tools = Join-Path \$root 'platform-tools'\n".
+                "\$zip = Join-Path \$root 'platform-tools.zip'\n".
+                "New-Item -ItemType Directory -Force -Path \$root | Out-Null\n".
+                "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n".
+                "Invoke-WebRequest -UseBasicParsing -Uri '".str_replace("'", "''", $url)."' -OutFile \$zip\n".
+                $checksumCheck."\n".
+                "if (Test-Path \$tools) { Remove-Item \$tools -Recurse -Force }\n".
+                "Expand-Archive -Path \$zip -DestinationPath \$root -Force\n".
+                "if (-not (Test-Path (Join-Path \$tools 'adb.exe'))) { throw 'adb.exe was not found after extraction.' }\n".
+                "\$env:Path = \"\$tools;\$env:Path\"\n".
+                "\$userPath = [string][Environment]::GetEnvironmentVariable('Path', 'User')\n".
+                "if ((\$userPath -split ';') -notcontains \$tools) { \$newPath = if ([string]::IsNullOrWhiteSpace(\$userPath)) { \$tools } else { \$userPath.TrimEnd(';') + ';' + \$tools }; [Environment]::SetEnvironmentVariable('Path', \$newPath, 'User') }\n".
+                "adb version\n".
+                "Write-Host 'PLATFORM_TOOLS_READY - close and reopen PowerShell before the next step.'";
+        }
+
+        $checksumCheck = $checksum
+            ? 'echo '.escapeshellarg(strtolower($checksum)).'  "$ZIP" | shasum -a 256 -c -'
+            : "printf 'WARNING: Platform Tools checksum is not configured; continuing only with the approved Google HTTPS URL.\\n'";
+
+        return "TOOLS_ROOT=\"\$HOME/deviceguard-tools\"\n".
+            "ZIP=\"\$TOOLS_ROOT/platform-tools.zip\"\n".
+            "mkdir -p \"\$TOOLS_ROOT\"\n".
+            "curl --fail --location \\\n".
+            escapeshellarg($url)." \\\n".
+            "--output \"\$ZIP\"\n".
+            $checksumCheck."\n".
+            "rm -rf \"\$TOOLS_ROOT/platform-tools\"\n".
+            "ditto -x -k \"\$ZIP\" \"\$TOOLS_ROOT\"\n".
+            "chmod +x \"\$TOOLS_ROOT/platform-tools/adb\"\n".
+            "PATH_LINE='export PATH=\"\$HOME/deviceguard-tools/platform-tools:\$PATH\"'\n".
+            "touch \"\$HOME/.zprofile\"\n".
+            "grep -Fqx \"\$PATH_LINE\" \"\$HOME/.zprofile\" || printf '%s\\n' \"\$PATH_LINE\" >> \"\$HOME/.zprofile\"\n".
+            "export PATH=\"\$HOME/deviceguard-tools/platform-tools:\$PATH\"\n".
+            "adb version\n".
+            "printf 'PLATFORM_TOOLS_READY - close and reopen Terminal before the next step.\\n'";
     }
 
     private function error(string $output, string $meaning, string $solution): array

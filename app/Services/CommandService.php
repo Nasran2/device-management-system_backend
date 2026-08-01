@@ -17,7 +17,7 @@ class CommandService
 
     public function __construct(private AuditService $audit) {}
 
-    public function create(Device $device, string $type, array $payload, User $requester): DeviceCommand
+    public function create(Device $device, string $type, array $payload, ?User $requester): DeviceCommand
     {
         if (! in_array($type, self::ALLOWED, true)) {
             throw ValidationException::withMessages(['type' => 'Unsupported command type.']);
@@ -32,7 +32,7 @@ class CommandService
             $canonical = $uuid.'|'.$device->uuid.'|'.$type.'|'.json_encode($payload, JSON_UNESCAPED_SLASHES).'|'.$expiresAt->toISOString();
             $command = $device->commands()->create([
                 'uuid' => $uuid,
-                'requested_by' => $requester->id,
+                'requested_by' => $requester?->id,
                 'type' => $type,
                 'payload' => $payload,
                 'signature' => hash_hmac('sha256', $canonical, $this->deviceKey($device)),
@@ -47,7 +47,7 @@ class CommandService
             if ($type === 'UNLOCK_DEVICE') {
                 $device->update(['status' => 'unlock_requested']);
             }
-            $this->audit->record(strtolower($type).'_requested', "{$type} requested", $requester, $device, [], ['command_uuid' => $uuid]);
+            $this->audit->record(strtolower($type).'_requested', "{$type} requested", $requester, $device, [], ['command_uuid' => $uuid, 'request_source' => $requester ? 'administrator' : 'verified_management_pin']);
             Log::info('Device command created', ['command_uuid' => $uuid, 'device_uuid' => $device->uuid, 'command_type' => $type]);
 
             return $command;

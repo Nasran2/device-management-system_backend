@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Services\AuditService;
+use App\Services\CommandService;
+use App\Services\OfflineProtectionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
@@ -11,7 +13,7 @@ use Illuminate\Support\Str;
 
 class ManagementPinController extends Controller
 {
-    private const PURPOSES = ['ENABLE_DEVICE_ADMIN', 'VIEW_MANAGEMENT_SETUP', 'DISABLE_DEVICE_ADMIN', 'REQUEST_RELEASE', 'LOCAL_RELEASE', 'OPEN_MANAGEMENT_SETTINGS'];
+    private const PURPOSES = ['ENABLE_DEVICE_ADMIN', 'VIEW_MANAGEMENT_SETUP', 'DISABLE_DEVICE_ADMIN', 'REQUEST_RELEASE', 'LOCAL_RELEASE', 'OPEN_MANAGEMENT_SETTINGS', 'PERMANENT_RELEASE'];
 
     public function verify(Request $request, AuditService $audit)
     {
@@ -39,5 +41,36 @@ class ManagementPinController extends Controller
         $audit->record('MANAGEMENT_PIN_VERIFICATION_SUCCEEDED', 'Management PIN verification succeeded', null, $device, [], ['purpose' => $data['purpose']]);
 
         return response()->json(['success' => true, 'message' => 'PIN verified', 'authorization_token' => $plainToken, 'expires_in' => 60]);
+    }
+
+    public function release(Request $request, CommandService $commands, OfflineProtectionService $offline, AuditService $audit)
+    {
+        $data = $request->validate(['authorization_token' => ['required', 'string', 'size:64']]);
+        $device = $request->attributes->get('device');
+        abort_if($device->isReleased(), 409, 'Device is already permanently released.');
+
+        $cacheKey = 'management_pin_auth:'.hash('sha256', $data['authorization_token']);
+        $authorization = Cache::pull($cacheKey);
+        if (! is_array($authorization)
+            || (int) ($authorization['device_id'] ?? 0) !== (int) $device->id
+            || ($authorization['purpose'] ?? null) !== 'PERMANENT_RELEASE'
+            || ($authorization['used'] ?? true)) {
+            $audit->record('MANAGEMENT_PIN_RELEASE_AUTHORIZATION_REJECTED', 'Management PIN release authorization rejected', null, $device);
+            return response()->json(['success' => false, 'message' => 'Release authorization is invalid, expired, or already used.'], 403);
+        }
+
+        $reason = 'Permanent release authorized with the device Management PIN';
+        $offline->permanentRelease($device, null, $reason);
+        $command = $commands->create($device, 'PERMANENT_RELEASE', [
+            'reason' => $reason,
+            'authorization_method' => 'management_pin',
+        ], null);
+        $audit->record('MANAGEMENT_PIN_RELEASE_AUTHORIZED', 'Permanent release authorized with verified Management PIN', null, $device, [], ['command_uuid' => $command->uuid]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Permanent release authorized. The signed release command is ready.',
+            'data' => ['command_id' => $command->id, 'command_uuid' => $command->uuid],
+        ]);
     }
 }

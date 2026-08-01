@@ -22,12 +22,13 @@ class OfflineProtectionController extends Controller
 
     public function events(Request $request, OfflineProtectionService $service)
     {
-        $data = $request->validate(['events' => ['required', 'array', 'max:100'], 'events.*.type' => ['required', 'in:WARNING_SHOWN,OFFLINE_LOCK_TRIGGERED,OFFLINE_LOCK_FAILED,INTERNET_RESTORED,CLOCK_TAMPERING'], 'events.*.occurred_at' => ['required', 'date'], 'events.*.metadata' => ['nullable', 'array']]);
+        $data = $request->validate(['events' => ['required', 'array', 'max:100'], 'events.*.type' => ['required', 'in:WARNING_SHOWN,OFFLINE_LOCK_TRIGGERED,OFFLINE_LOCK_FAILED,INTERNET_RESTORED,OFFLINE_LOCK_CLEARED,CLOCK_TAMPERING'], 'events.*.occurred_at' => ['required', 'date'], 'events.*.metadata' => ['nullable', 'array']]);
         $device = $request->attributes->get('device');
         $policy = $service->policyFor($device);
         foreach ($data['events'] as $event) {
             $service->audit($device, $event['type'], $policy, null, ($event['metadata'] ?? []) + ['phone_occurred_at' => $event['occurred_at']]);
             if ($event['type'] === 'OFFLINE_LOCK_TRIGGERED') $policy->update(['last_offline_lock_at' => now(), 'last_offline_lock_result' => 'success', 'phone_local_locked' => true]);
+            if ($event['type'] === 'OFFLINE_LOCK_CLEARED') $policy->update(['last_offline_lock_result' => 'recovered', 'phone_local_locked' => false]);
         }
         return response()->json(['message' => 'Offline events uploaded.']);
     }

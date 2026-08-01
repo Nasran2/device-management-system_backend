@@ -8,4 +8,38 @@
 <label class="field-label">Commission calculation basis <x-required/><select class="field-input" name="commission_basis">@foreach(['selling_price_percentage'=>'Percentage of total selling price','financed_balance_percentage'=>'Percentage of financed balance','fixed_per_device'=>'Fixed amount per device','custom_per_device'=>'Custom per-device commission'] as $v=>$label)<option value="{{ $v }}" @selected(old('commission_basis',$shop->commission_basis??'selling_price_percentage')===$v)>{{ $label }}</option>@endforeach</select></label>
 <label class="field-label">Fixed commission amount<input class="field-input" type="number" step=".01" name="fixed_commission_amount" value="{{ old('fixed_commission_amount',$shop->fixed_commission_amount??0) }}"></label><label class="field-label">Account status <x-required/><select class="field-input" name="status"><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
 <label class="field-label">{{ $editing?'New temporary password (optional)':'Temporary password' }} @unless($editing)<x-required/>@endunless<input class="field-input" type="password" name="temporary_password" @required(!$editing)></label>
-</div><div class="grid gap-3 sm:grid-cols-2">@foreach(['sms_enabled'=>'SMS notifications','device_registration_enabled'=>'Device registration','lock_unlock_enabled'=>'Lock/unlock permission','staff_accounts_enabled'=>'Staff accounts'] as $name=>$label)<label class="flex gap-2 rounded-xl bg-slate-50 p-3"><input type="checkbox" name="{{ $name }}" value="1" @checked(old($name,$shop->$name??true))> {{ $label }} enabled</label>@endforeach</div><label class="field-label">Notes<textarea class="field-input" name="notes">{{ old('notes',$shop->notes??'') }}</textarea></label><button class="primary-button">{{ $editing?'Save changes':'Create Shop Owner login' }}</button></form></div></x-layouts.app>
+</div><div class="grid gap-3 sm:grid-cols-2">@foreach(['sms_enabled'=>'SMS notifications','device_registration_enabled'=>'Device registration','lock_unlock_enabled'=>'Lock/unlock permission','staff_accounts_enabled'=>'Staff accounts'] as $name=>$label)<label class="flex gap-2 rounded-xl bg-slate-50 p-3"><input type="checkbox" name="{{ $name }}" value="1" @checked(old($name,$shop->$name??true))> {{ $label }} enabled</label>@endforeach</div><label class="field-label">Notes<textarea class="field-input" name="notes">{{ old('notes',$shop->notes??'') }}</textarea></label><button class="primary-button">{{ $editing?'Save changes':'Create Shop Owner login' }}</button></form></div>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const basisSelect = document.querySelector('select[name="commission_basis"]');
+        const percentageField = document.querySelector('input[name="commission_percentage"]').parentElement;
+        const percentageInput = document.querySelector('input[name="commission_percentage"]');
+        const fixedField = document.querySelector('input[name="fixed_commission_amount"]').parentElement;
+        const fixedInput = document.querySelector('input[name="fixed_commission_amount"]');
+
+        function toggleFields() {
+            if (basisSelect.value === 'fixed_per_device') {
+                percentageField.style.display = 'none';
+                fixedField.style.display = 'block';
+                fixedInput.required = true;
+                percentageInput.required = false;
+                if (!percentageInput.value) percentageInput.value = '0';
+            } else if (basisSelect.value === 'custom_per_device') {
+                percentageField.style.display = 'none';
+                fixedField.style.display = 'none';
+                fixedInput.required = false;
+                percentageInput.required = false;
+                if (!percentageInput.value) percentageInput.value = '0';
+            } else {
+                percentageField.style.display = 'block';
+                fixedField.style.display = 'none';
+                percentageInput.required = true;
+                fixedInput.required = false;
+            }
+        }
+
+        basisSelect.addEventListener('change', toggleFields);
+        toggleFields();
+    });
+</script>
+</x-layouts.app>
