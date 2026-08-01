@@ -157,12 +157,12 @@ class DeviceSetupWizardTest extends TestCase
             implode("\n", $windows->numbered_instructions)."\n".
             implode("\n", $macos->numbered_instructions);
 
-        $this->assertStringContainsString('https://phone.twinsofte.com/downloads/deviceguard.apk', $allText);
+        $this->assertStringContainsString('https://phonelock.twinsofte.com/downloads/deviceguard.apk', $allText);
         $this->assertStringNotContainsString('CONFIGURE_APK_URL_IN_SUPER_ADMIN', $allText);
         $this->assertStringNotContainsString('CONFIGURE_SHA256_IN_SUPER_ADMIN', $allText);
-        $this->assertStringNotContainsString('phonelock.twinsofte.com/downloads', $allText);
+        $this->assertStringNotContainsString('https://phone.twinsofte.com/downloads', $allText);
         $this->assertStringContainsString("Set-Location (Join-Path \$HOME 'Downloads')", $windows->command);
-        $this->assertStringContainsString('https://phone.twinsofte.com/downloads/deviceguard.apk', $windows->command);
+        $this->assertStringContainsString('https://phonelock.twinsofte.com/downloads/deviceguard.apk', $windows->command);
         $this->assertStringContainsString('Get-Item .\\deviceguard.apk |', $windows->command);
         $this->assertStringContainsString('$actualHash = (Get-FileHash $apkPath -Algorithm SHA256).Hash.ToUpper()', $windows->command);
         $this->assertStringContainsString('$expectedHash = $ConfiguredApkFileSha256.Trim().ToUpper()', $windows->command);
@@ -174,7 +174,7 @@ class DeviceSetupWizardTest extends TestCase
         $this->assertStringContainsString('adb install -r -t .\\deviceguard.apk', $windows->command);
         $this->assertSame('Windows Downloads folder', $windows->run_from);
         $this->assertStringContainsString('cd ~/Downloads', $macos->command);
-        $this->assertStringContainsString('https://phone.twinsofte.com/downloads/deviceguard.apk', $macos->command);
+        $this->assertStringContainsString('https://phonelock.twinsofte.com/downloads/deviceguard.apk', $macos->command);
         $this->assertStringContainsString('-o deviceguard.apk', $macos->command);
         $this->assertStringContainsString('adb install -r -t deviceguard.apk', $macos->command);
         $this->assertSame('~/Downloads', $macos->run_from);
@@ -205,7 +205,7 @@ class DeviceSetupWizardTest extends TestCase
         ]);
         $windowsUrl = URL::temporarySignedRoute('setup.helper', now()->addMinute(), ['setup' => $session, 'os' => 'windows']);
         $windows = $this->actingAs($user)->get($windowsUrl)->assertOk()->getContent();
-        $this->assertStringContainsString('-Uri "https://phone.twinsofte.com/downloads/deviceguard.apk"', $windows);
+        $this->assertStringContainsString('-Uri "https://phonelock.twinsofte.com/downloads/deviceguard.apk"', $windows);
         $this->assertStringContainsString('$actualHash = (Get-FileHash $apkPath -Algorithm SHA256).Hash.ToUpper()', $windows);
         $this->assertStringContainsString('$expectedHash = $ConfiguredApkFileSha256.Trim().ToUpper()', $windows);
         $this->assertStringContainsString('Expected APK SHA-256: $expectedHash', $windows);
@@ -221,7 +221,7 @@ class DeviceSetupWizardTest extends TestCase
         $session->update(['computer_os' => 'macos']);
         $macUrl = URL::temporarySignedRoute('setup.helper', now()->addMinute(), ['setup' => $session, 'os' => 'macos']);
         $mac = $this->actingAs($user)->get($macUrl)->assertOk()->getContent();
-        $this->assertStringContainsString('https://phone.twinsofte.com/downloads/deviceguard.apk', $mac);
+        $this->assertStringContainsString('https://phonelock.twinsofte.com/downloads/deviceguard.apk', $mac);
         $this->assertStringContainsString(SetupInstructionCatalog::MACOS_PLATFORM_TOOLS_URL, $mac);
         $this->assertStringContainsString('Homebrew is not required', $mac);
         $this->assertStringContainsString('Connect exactly one Android phone', $mac);
@@ -428,7 +428,7 @@ class DeviceSetupWizardTest extends TestCase
         ]);
 
         $response = $this->actingAs($super)->get(route('settings.qr-provisioning'))->assertOk();
-        $response->assertSee('https://phone.twinsofte.com/downloads/deviceguard.apk')
+        $response->assertSee('https://phonelock.twinsofte.com/downloads/deviceguard.apk')
             ->assertSee('APK file SHA-256 is not configured by Super Admin.')
             ->assertSee('com.twinsofte.deviceguard')
             ->assertSee('com.twinsofte.deviceguard/.devicepolicy.DevicePolicyReceiver')
@@ -455,11 +455,11 @@ class DeviceSetupWizardTest extends TestCase
         ]);
         SystemSetting::create([
             'key' => 'provisioning_apk_url',
-            'value' => 'https://phone.twinsofte.com/downloads/deviceguard.apk',
+            'value' => 'https://phonelock.twinsofte.com/downloads/deviceguard.apk',
             'type' => 'string',
         ]);
         Http::fake([
-            'https://phone.twinsofte.com/downloads/deviceguard.apk' => Http::response('PK-deviceguard-apk', 200, [
+            'https://phonelock.twinsofte.com/downloads/deviceguard.apk' => Http::response('PK-deviceguard-apk', 200, [
                 'Content-Type' => 'application/vnd.android.package-archive',
                 'Content-Length' => '18',
             ]),

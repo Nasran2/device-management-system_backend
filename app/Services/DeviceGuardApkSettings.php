@@ -76,7 +76,7 @@ class DeviceGuardApkSettings
 
     public function isRetiredValue(string $value): bool
     {
-        $retiredHost = 'phone'.'lock.twinsofte.com';
+        $retiredHost = 'phone.twinsofte.com';
 
         return str_starts_with($value, 'CONFIG'.'URE_')
             || strtolower((string) parse_url($value, PHP_URL_HOST)) === $retiredHost

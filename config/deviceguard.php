@@ -11,7 +11,7 @@ return [
     | every setup surface falls back to this single production URL.
     |
     */
-    'apk_url' => env('DEVICEGUARD_APK_URL', 'https://phone.twinsofte.com/downloads/deviceguard.apk'),
+    'apk_url' => env('DEVICEGUARD_APK_URL', 'https://phonelock.twinsofte.com/downloads/deviceguard.apk'),
     'package_name' => 'com.twinsofte.deviceguard',
     'device_admin_receiver' => 'com.twinsofte.deviceguard/.devicepolicy.DevicePolicyReceiver',
 ];

@@ -603,6 +603,18 @@ class DeviceManagementTest extends TestCase
         $this->assertNull($settings->fileSha256());
     }
 
+    public function test_apk_url_uses_phonelock_host_and_retires_the_wrong_phone_host(): void
+    {
+        $settings = app(DeviceGuardApkSettings::class);
+        $correctUrl = 'https://phonelock.twinsofte.com/downloads/deviceguard.apk';
+        $wrongUrl = 'https://phone.twinsofte.com/downloads/deviceguard.apk';
+
+        $this->assertFalse($settings->isRetiredValue($correctUrl));
+        $this->assertTrue($settings->isRetiredValue($wrongUrl));
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_URL, 'value' => $wrongUrl, 'type' => 'string']);
+        $this->assertSame($correctUrl, $settings->url());
+    }
+
     public function test_apk_checksum_fields_reject_the_wrong_formats(): void
     {
         $super = $this->user('super_admin');
@@ -644,9 +656,9 @@ class DeviceManagementTest extends TestCase
         $super = $this->user('super_admin');
         $body = 'PK-hosted-deviceguard-apk';
         $expected = strtoupper(hash('sha256', $body));
-        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_URL, 'value' => 'https://phone.twinsofte.com/downloads/deviceguard.apk', 'type' => 'string']);
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_URL, 'value' => 'https://phonelock.twinsofte.com/downloads/deviceguard.apk', 'type' => 'string']);
         Http::fake([
-            'https://phone.twinsofte.com/downloads/deviceguard.apk' => Http::sequence()
+            'https://phonelock.twinsofte.com/downloads/deviceguard.apk' => Http::sequence()
                 ->push($body, 200, ['Content-Type' => 'application/vnd.android.package-archive'])
                 ->push($body, 200, ['Content-Type' => 'application/vnd.android.package-archive']),
         ]);
@@ -665,10 +677,10 @@ class DeviceManagementTest extends TestCase
         $super = $this->user('super_admin');
         $expected = strtoupper(hash('sha256', 'approved-content'));
         $actual = strtoupper(hash('sha256', 'modified-content'));
-        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_URL, 'value' => 'https://phone.twinsofte.com/downloads/deviceguard.apk', 'type' => 'string']);
+        SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_URL, 'value' => 'https://phonelock.twinsofte.com/downloads/deviceguard.apk', 'type' => 'string']);
         SystemSetting::create(['key' => DeviceGuardApkSettings::SETTING_FILE_SHA256, 'value' => $expected, 'type' => 'string']);
         Http::fake([
-            'https://phone.twinsofte.com/downloads/deviceguard.apk' => Http::response('modified-content', 200, ['Content-Type' => 'application/vnd.android.package-archive']),
+            'https://phonelock.twinsofte.com/downloads/deviceguard.apk' => Http::response('modified-content', 200, ['Content-Type' => 'application/vnd.android.package-archive']),
         ]);
 
         $response = $this->actingAs($super)->post(route('settings.qr-provisioning.checksum'));
