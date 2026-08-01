@@ -183,6 +183,48 @@ class OfflineProtectionTest extends TestCase
         )->once();
     }
 
+    public function test_valid_but_different_signing_key_is_rejected_as_incompatible_with_installed_apk(): void
+    {
+        $device = $this->device($this->user());
+        $differentKey = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+        $this->assertNotFalse($differentKey);
+        $this->assertTrue(openssl_pkey_export($differentKey, $differentPem));
+        $path = tempnam(sys_get_temp_dir(), 'deviceguard-different-key-');
+        file_put_contents($path, $differentPem);
+        config(['device.offline_policy_private_key' => $path]);
+        Log::spy();
+
+        try {
+            app(OfflineProtectionService::class)->issue($device);
+            $this->fail('Expected a signing key that does not match the installed APK to be rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Offline policy signing key is incompatible with the installed Android app.', $exception->getMessage());
+        } finally {
+            unlink($path);
+        }
+
+        Log::shouldHaveReceived('critical')->with(
+            'Offline policy signing key is incompatible with the installed Android app.',
+            \Mockery::on(fn (array $context) => $context['expected_public_key_sha256'] === config('device.offline_policy_expected_public_key_sha256')
+                && is_string($context['actual_public_key_sha256'])
+                && $context['actual_public_key_sha256'] !== $context['expected_public_key_sha256']
+                && $context['private_key_bits'] === 2048
+                && ! str_contains(json_encode($context), $differentPem)),
+        )->once();
+    }
+
+    public function test_configured_signing_key_matches_installed_apk_public_key_fingerprint(): void
+    {
+        $privateKey = openssl_pkey_get_private(file_get_contents(config('device.offline_policy_private_key')));
+        $details = openssl_pkey_get_details($privateKey);
+        $encoded = preg_replace('/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s+/', '', $details['key']);
+
+        $this->assertSame(
+            config('device.offline_policy_expected_public_key_sha256'),
+            hash('sha256', base64_decode($encoded, true)),
+        );
+    }
+
     public function test_opt_in_web_process_diagnostics_contain_only_safe_key_metadata(): void
     {
         $device = $this->device($this->user());

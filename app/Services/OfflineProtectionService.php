@@ -221,6 +221,25 @@ class OfflineProtectionService
             throw new RuntimeException('Unable to load offline policy signing key.');
         }
 
+        $expectedFingerprint = strtolower(trim((string) config('device.offline_policy_expected_public_key_sha256')));
+        $keyDetails = openssl_pkey_get_details($privateKey);
+        $actualFingerprint = is_array($keyDetails)
+            ? $this->publicKeyFingerprint($keyDetails['key'] ?? null)
+            : null;
+        if (
+            preg_match('/\A[a-f0-9]{64}\z/D', $expectedFingerprint) !== 1
+            || $actualFingerprint === null
+            || ! hash_equals($expectedFingerprint, $actualFingerprint)
+        ) {
+            Log::critical('Offline policy signing key is incompatible with the installed Android app.', $diagnostics + [
+                'expected_public_key_sha256' => $expectedFingerprint !== '' ? $expectedFingerprint : null,
+                'actual_public_key_sha256' => $actualFingerprint,
+                'private_key_bits' => is_array($keyDetails) ? ($keyDetails['bits'] ?? null) : null,
+            ]);
+
+            throw new RuntimeException('Offline policy signing key is incompatible with the installed Android app.');
+        }
+
         $canonicalPayload = $this->canonical($payload);
         $signed = openssl_sign($canonicalPayload, $signature, $privateKey, OPENSSL_ALGO_SHA256);
         if ($signed !== true) {
@@ -233,6 +252,18 @@ class OfflineProtectionService
         }
 
         return base64_encode($signature);
+    }
+
+    private function publicKeyFingerprint(mixed $publicKeyPem): ?string
+    {
+        if (! is_string($publicKeyPem) || trim($publicKeyPem) === '') {
+            return null;
+        }
+
+        $encoded = preg_replace('/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s+/', '', $publicKeyPem);
+        $der = is_string($encoded) ? base64_decode($encoded, true) : false;
+
+        return $der === false ? null : hash('sha256', $der);
     }
 
     private function clearOpenSslErrors(): void
