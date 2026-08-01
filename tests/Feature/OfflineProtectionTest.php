@@ -10,6 +10,8 @@ use App\Models\OfflineProtectionSetting;
 use App\Models\User;
 use App\Services\OfflineProtectionService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Log;
+use RuntimeException;
 use Tests\TestCase;
 
 class OfflineProtectionTest extends TestCase
@@ -95,6 +97,113 @@ class OfflineProtectionTest extends TestCase
         $this->assertSame($device->device_uuid, $envelope['payload']['device_uuid']);
     }
 
+    public function test_canonical_payload_is_consistent_regardless_of_top_level_key_order(): void
+    {
+        $service = app(OfflineProtectionService::class);
+        $first = ['policy_version' => 3, 'device_uuid' => 'device-123', 'enabled' => true];
+        $second = ['enabled' => true, 'device_uuid' => 'device-123', 'policy_version' => 3];
+
+        $this->assertSame($service->canonical($first), $service->canonical($second));
+        $this->assertSame('{"device_uuid":"device-123","enabled":true,"policy_version":3}', $service->canonical($first));
+    }
+
+    public function test_missing_private_key_path_fails_safely(): void
+    {
+        $device = $this->device($this->user());
+        $missingPath = storage_path('app/private/missing-offline-policy-key.pem');
+        config(['device.offline_policy_private_key' => $missingPath]);
+        Log::spy();
+
+        try {
+            app(OfflineProtectionService::class)->issue($device);
+            $this->fail('Expected the missing signing key to be rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Offline policy signing key file is unavailable.', $exception->getMessage());
+        }
+
+        Log::shouldHaveReceived('error')->with(
+            'Offline policy private key file is unavailable.',
+            \Mockery::on(fn (array $context) => $context['configured_path'] === $missingPath
+                && $context['file_exists'] === false
+                && $context['file_readable'] === false
+                && $context['php_sapi'] === PHP_SAPI),
+        )->once();
+    }
+
+    public function test_unreadable_private_key_is_rejected_before_openssl_loading(): void
+    {
+        $device = $this->device($this->user());
+        $path = tempnam(sys_get_temp_dir(), 'deviceguard-unreadable-key-');
+        $this->assertNotFalse($path);
+        file_put_contents($path, 'not-sensitive-test-content');
+        chmod($path, 0000);
+        clearstatcache(true, $path);
+
+        if (is_readable($path)) {
+            chmod($path, 0600);
+            unlink($path);
+            $this->markTestSkipped('The current test user can read mode-000 files.');
+        }
+
+        config(['device.offline_policy_private_key' => $path]);
+        try {
+            app(OfflineProtectionService::class)->issue($device);
+            $this->fail('Expected the unreadable signing key to be rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Offline policy signing key file is unavailable.', $exception->getMessage());
+        } finally {
+            chmod($path, 0600);
+            unlink($path);
+        }
+    }
+
+    public function test_invalid_private_key_pem_is_rejected_without_logging_key_content(): void
+    {
+        $device = $this->device($this->user());
+        $path = tempnam(sys_get_temp_dir(), 'deviceguard-invalid-key-');
+        $invalidPem = "-----BEGIN PRIVATE KEY-----\ninvalid-private-key-test-content\n-----END PRIVATE KEY-----\n";
+        file_put_contents($path, $invalidPem);
+        config(['device.offline_policy_private_key' => $path]);
+        Log::spy();
+
+        try {
+            app(OfflineProtectionService::class)->issue($device);
+            $this->fail('Expected the invalid signing key to be rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('Unable to load offline policy signing key.', $exception->getMessage());
+        } finally {
+            unlink($path);
+        }
+
+        Log::shouldHaveReceived('error')->with(
+            'Unable to load offline policy private key.',
+            \Mockery::on(fn (array $context) => $context['configured_path'] === $path
+                && $context['pem_length'] === strlen($invalidPem)
+                && ! str_contains(json_encode($context), $invalidPem)),
+        )->once();
+    }
+
+    public function test_opt_in_web_process_diagnostics_contain_only_safe_key_metadata(): void
+    {
+        $device = $this->device($this->user());
+        $path = config('device.offline_policy_private_key');
+        $pem = file_get_contents($path);
+        config(['device.offline_policy_diagnostics' => true]);
+        Log::spy();
+
+        app(OfflineProtectionService::class)->issue($device);
+
+        Log::shouldHaveReceived('info')->with(
+            'Offline policy signing key diagnostics.',
+            \Mockery::on(fn (array $context) => $context['configured_path'] === $path
+                && $context['file_exists'] === true
+                && $context['file_readable'] === true
+                && $context['file_size'] === filesize($path)
+                && $context['php_sapi'] === PHP_SAPI
+                && ! str_contains(json_encode($context), $pem)),
+        )->once();
+    }
+
     public function test_old_or_mismatched_acknowledgement_is_rejected(): void
     {
         $device = $this->device($this->user());
@@ -131,7 +240,9 @@ class OfflineProtectionTest extends TestCase
             'network_status' => 'online',
             'local_lock_reason' => 'OFFLINE_TIMEOUT',
         ])->assertOk()->assertJsonPath('data.offline_policy.payload.offline_unlock_authorized', true)
-            ->assertJsonPath('data.offline_policy.payload.offline_unlock_reason', 'OFFLINE_TIMEOUT');
+            ->assertJsonPath('data.offline_policy.payload.offline_unlock_reason', 'OFFLINE_TIMEOUT')
+            ->assertJsonPath('data.offline_policy.algorithm', 'SHA256withRSA')
+            ->assertJsonStructure(['data' => ['server_utc_time', 'status', 'lock_status', 'commands', 'offline_policy' => ['payload', 'signature', 'algorithm']]]);
 
         $envelope = $response->json('data.offline_policy');
         $service = app(OfflineProtectionService::class);
@@ -142,6 +253,47 @@ class OfflineProtectionTest extends TestCase
             'local_lock_reason' => 'INTEGRITY_FAILURE',
         ])->assertOk()->assertJsonPath('data.offline_policy.payload.offline_unlock_authorized', false)
             ->assertJsonPath('data.offline_policy.payload.offline_unlock_reason', 'NONE');
+    }
+
+    public function test_heartbeat_returns_controlled_error_and_does_not_mark_sync_success_when_signing_fails(): void
+    {
+        $device = $this->device($this->user());
+        $plain = 'signing-failure-device-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $plain)]);
+        $path = tempnam(sys_get_temp_dir(), 'deviceguard-heartbeat-invalid-key-');
+        $invalidPem = "-----BEGIN PRIVATE KEY-----\nheartbeat-invalid-key-content\n-----END PRIVATE KEY-----\n";
+        file_put_contents($path, $invalidPem);
+        config(['device.offline_policy_private_key' => $path]);
+        Log::spy();
+
+        try {
+            $response = $this->withToken($plain)->postJson('/api/v1/devices/heartbeat', [
+                'network_status' => 'online',
+                'local_lock_reason' => 'NONE',
+            ])->assertStatus(503)->assertExactJson([
+                'message' => 'Device synchronization is temporarily unavailable.',
+                'error_code' => 'OFFLINE_POLICY_SIGNING_FAILED',
+            ]);
+        } finally {
+            unlink($path);
+        }
+
+        $this->assertStringNotContainsString($invalidPem, $response->getContent());
+        $this->assertNull($device->fresh()->last_sync_at);
+        $this->assertNull($device->fresh()->last_seen_at);
+        $this->assertDatabaseMissing('offline_protection_audits', [
+            'device_id' => $device->id,
+            'event_type' => 'POLICY_SENT',
+        ]);
+        $this->assertNull($device->offlinePolicy()->firstOrFail()->last_issued_nonce);
+
+        Log::shouldHaveReceived('error')->with(
+            'Device heartbeat failed while issuing the signed offline policy.',
+            \Mockery::on(fn (array $context) => $context['device_id'] === $device->id
+                && $context['device_uuid'] === $device->uuid
+                && $context['request_path'] === 'api/v1/devices/heartbeat'
+                && ! array_key_exists('exception', $context)),
+        )->once();
     }
 
     public function test_manual_or_payment_server_lock_never_receives_offline_unlock_authorization(): void

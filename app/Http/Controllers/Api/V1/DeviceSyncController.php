@@ -3,8 +3,10 @@
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
 use App\Services\OfflineProtectionService;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use RuntimeException;
 
 class DeviceSyncController extends Controller
 {
@@ -21,10 +23,27 @@ class DeviceSyncController extends Controller
         $device = $request->attributes->get('device');
         $localLockReason = $data['local_lock_reason'] ?? 'NONE';
         unset($data['local_lock_reason']);
-        $device->update($data + ['last_seen_at' => now(), 'last_sync_at' => now()]);
 
         $freshDevice = $device->fresh();
-        $signedPolicy = $offline->issue($freshDevice, $localLockReason === 'OFFLINE_TIMEOUT');
+        try {
+            $signedPolicy = $offline->issue($freshDevice, $localLockReason === 'OFFLINE_TIMEOUT');
+        } catch (RuntimeException $exception) {
+            Log::error('Device heartbeat failed while issuing the signed offline policy.', [
+                'device_id' => $device->id,
+                'device_uuid' => $device->uuid,
+                'request_path' => $request->path(),
+                'php_sapi' => PHP_SAPI,
+                'exception_class' => $exception::class,
+            ]);
+
+            return response()->json([
+                'message' => 'Device synchronization is temporarily unavailable.',
+                'error_code' => 'OFFLINE_POLICY_SIGNING_FAILED',
+            ], 503);
+        }
+
+        $device->update($data + ['last_seen_at' => now(), 'last_sync_at' => now()]);
+        $freshDevice = $device->fresh();
         $commands = $device->commands()->whereIn('status', ['pending', 'dispatched'])->where('expires_at', '>', now())->oldest()->get()
             ->map->only(['id', 'uuid', 'type', 'payload', 'signature', 'expires_at', 'status']);
 

@@ -9,6 +9,7 @@ use App\Models\OfflineProtectionSetting;
 use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use RuntimeException;
 
@@ -82,6 +83,8 @@ class OfflineProtectionService
             'server_utc_time' => $now->toIso8601String(),
             'warning_notification_enabled' => (bool) $global->warning_notification_enabled,
         ];
+        $signature = $this->sign($payload);
+
         $policy->update([
             'policy_issued_at' => $now,
             'policy_expires_at' => $deadline->addDay(),
@@ -99,7 +102,7 @@ class OfflineProtectionService
             );
         }
 
-        return ['payload' => $payload, 'signature' => $this->sign($payload), 'algorithm' => 'SHA256withRSA'];
+        return ['payload' => $payload, 'signature' => $signature, 'algorithm' => 'SHA256withRSA'];
     }
 
     public function acknowledge(Device $device, array $data): DeviceOfflinePolicy
@@ -172,11 +175,78 @@ class OfflineProtectionService
     private function sign(array $payload): string
     {
         $path = config('device.offline_policy_private_key');
-        $key = is_string($path) && is_file($path) ? file_get_contents($path) : false;
-        if (! $key || ! openssl_sign($this->canonical($payload), $signature, $key, OPENSSL_ALGO_SHA256)) {
-            throw new RuntimeException('Offline policy signing key is missing or invalid.');
+        $diagnostics = [
+            'configured_path' => is_string($path) ? $path : null,
+            'path_is_string' => is_string($path),
+            'file_exists' => is_string($path) && is_file($path),
+            'file_readable' => is_string($path) && is_readable($path),
+            'file_size' => is_string($path) && is_file($path) ? @filesize($path) : null,
+            'php_sapi' => PHP_SAPI,
+        ];
+
+        if (config('device.offline_policy_diagnostics', false)) {
+            Log::info('Offline policy signing key diagnostics.', $diagnostics);
         }
+
+        if (
+            ! is_string($path)
+            || trim($path) === ''
+            || ! $diagnostics['file_exists']
+            || ! $diagnostics['file_readable']
+        ) {
+            Log::error('Offline policy private key file is unavailable.', $diagnostics);
+
+            throw new RuntimeException('Offline policy signing key file is unavailable.');
+        }
+
+        $pem = @file_get_contents($path);
+        if ($pem === false || trim($pem) === '') {
+            Log::error('Offline policy private key file is empty.', $diagnostics);
+
+            throw new RuntimeException('Offline policy signing key file is empty.');
+        }
+
+        $this->clearOpenSslErrors();
+        $privateKey = openssl_pkey_get_private($pem);
+        if ($privateKey === false) {
+            Log::error('Unable to load offline policy private key.', $diagnostics + [
+                'pem_length' => strlen($pem),
+                'openssl_errors' => $this->openSslErrors(),
+            ]);
+
+            throw new RuntimeException('Unable to load offline policy signing key.');
+        }
+
+        $canonicalPayload = $this->canonical($payload);
+        $signed = openssl_sign($canonicalPayload, $signature, $privateKey, OPENSSL_ALGO_SHA256);
+        if ($signed !== true) {
+            Log::error('Offline policy signing operation failed.', $diagnostics + [
+                'payload_length' => strlen($canonicalPayload),
+                'openssl_errors' => $this->openSslErrors(),
+            ]);
+
+            throw new RuntimeException('Offline policy signing operation failed.');
+        }
+
         return base64_encode($signature);
+    }
+
+    private function clearOpenSslErrors(): void
+    {
+        while (openssl_error_string() !== false) {
+            // Remove errors left by unrelated OpenSSL operations in this PHP process.
+        }
+    }
+
+    /** @return list<string> */
+    private function openSslErrors(): array
+    {
+        $errors = [];
+        while (($error = openssl_error_string()) !== false) {
+            $errors[] = $error;
+        }
+
+        return $errors;
     }
 
     public function canonical(array $payload): string
