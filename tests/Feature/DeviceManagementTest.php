@@ -233,6 +233,14 @@ class DeviceManagementTest extends TestCase
         $this->assertDatabaseHas('device_commands', ['id' => $failed->id, 'status' => 'failed', 'failure_code' => 'NOT_DEVICE_OWNER']);
         $this->assertSame('active_unlocked', $device->fresh()->status);
         $this->assertSame('unlocked', $device->fresh()->lock_status);
+
+        $lockNowFailed = app(CommandService::class)->create($device->fresh(), 'LOCK_DEVICE', [], $admin);
+        $this->withToken($plain)->postJson("/api/v1/commands/{$lockNowFailed->id}/result", [
+            'success' => false,
+            'message' => 'Android did not confirm the Device Owner lock action',
+            'failure_code' => 'LOCK_NOW_FAILED',
+        ])->assertOk();
+        $this->assertDatabaseHas('device_commands', ['id' => $lockNowFailed->id, 'status' => 'failed', 'failure_code' => 'LOCK_NOW_FAILED']);
     }
 
     public function test_permanent_release_requires_password(): void

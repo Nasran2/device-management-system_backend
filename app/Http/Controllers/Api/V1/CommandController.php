@@ -45,7 +45,7 @@ class CommandController extends Controller
         $data = $request->validate([
             'success' => ['required', 'boolean'],
             'message' => ['nullable', 'string', 'max:1000'],
-            'failure_code' => ['nullable', 'in:NOT_DEVICE_OWNER,ADMIN_NOT_ACTIVE,LOCK_TASK_NOT_PERMITTED,INVALID_SIGNATURE,COMMAND_EXPIRED,DUPLICATE_COMMAND,NETWORK_ERROR,LOCATION_PERMISSION_DENIED,GPS_DISABLED,DEVICE_RELEASED,UNKNOWN_ERROR'],
+            'failure_code' => ['nullable', 'in:NOT_DEVICE_OWNER,ADMIN_NOT_ACTIVE,LOCK_TASK_NOT_PERMITTED,LOCK_NOW_FAILED,INVALID_SIGNATURE,COMMAND_EXPIRED,DUPLICATE_COMMAND,NETWORK_ERROR,LOCATION_PERMISSION_DENIED,GPS_DISABLED,DEVICE_RELEASED,UNKNOWN_ERROR'],
         ]);
         if (in_array($command->status, ['completed', 'failed'], true)) {
             return response()->json(['message' => 'Result already recorded.'], 409);

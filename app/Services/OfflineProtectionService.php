@@ -67,7 +67,11 @@ class OfflineProtectionService
             && $device->status === 'active_unlocked'
             && $device->lock_status === 'unlocked';
         $payload = [
-            'device_uuid' => (string) $device->device_uuid,
+            // Activation and Device Owner provisioning both return devices.uuid to
+            // the APK as data.device_uuid. The verifier compares the signed policy
+            // against that stored enrollment identity, not the phone-reported
+            // devices.device_uuid value.
+            'device_uuid' => (string) $device->uuid,
             'expires_at' => $deadline->addDay()->toIso8601String(),
             'final_warning_seconds' => (int) $global->final_warning_seconds,
             'first_warning_seconds' => (int) $global->first_warning_seconds,

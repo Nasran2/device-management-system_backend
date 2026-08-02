@@ -94,7 +94,8 @@ class OfflineProtectionTest extends TestCase
         $envelope = $service->issue($device);
         $public = file_get_contents(config('device.offline_policy_public_key'));
         $this->assertSame(1, openssl_verify($service->canonical($envelope['payload']), base64_decode($envelope['signature']), $public, OPENSSL_ALGO_SHA256));
-        $this->assertSame($device->device_uuid, $envelope['payload']['device_uuid']);
+        $this->assertNotSame($device->uuid, $device->device_uuid);
+        $this->assertSame($device->uuid, $envelope['payload']['device_uuid']);
     }
 
     public function test_canonical_payload_is_consistent_regardless_of_top_level_key_order(): void
@@ -405,6 +406,74 @@ class OfflineProtectionTest extends TestCase
             'local_lock_reason' => 'INTEGRITY_FAILURE',
         ])->assertOk()->assertJsonPath('data.offline_policy.payload.offline_unlock_authorized', false)
             ->assertJsonPath('data.offline_policy.payload.offline_unlock_reason', 'NONE');
+    }
+
+    public function test_existing_apk_sync_contract_heartbeats_then_acknowledges_policy(): void
+    {
+        $device = $this->device($this->user());
+        $plain = 'existing-apk-sync-contract-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $plain)]);
+        Log::spy();
+
+        $heartbeat = $this->withToken($plain)->postJson('/api/v1/devices/heartbeat', [
+            'battery_percentage' => null,
+            'gps_status' => 'enabled',
+            'network_status' => 'online',
+            'fcm_token' => null,
+            'app_version' => '1.0.3',
+            'local_lock_reason' => 'NONE',
+        ])->assertOk();
+
+        $payload = $heartbeat->json('data.offline_policy.payload');
+        $this->assertSame($device->uuid, $payload['device_uuid']);
+        $this->assertNotSame($device->device_uuid, $payload['device_uuid']);
+        $this->withToken($plain)->postJson('/api/v1/devices/offline-policy/acknowledge', [
+            'policy_version' => $payload['policy_version'],
+            'nonce' => $payload['nonce'],
+            'signature_verified' => true,
+            'stored_successfully' => true,
+            'local_deadline_at' => $payload['offline_deadline_at'],
+            'last_trusted_server_time' => $payload['server_utc_time'],
+            'local_locked' => false,
+            'network_status' => 'online',
+        ])->assertOk();
+
+        $policy = $device->offlinePolicy()->firstOrFail();
+        $this->assertNotNull($device->fresh()->last_sync_at);
+        $this->assertNotNull($policy->policy_acknowledged_at);
+        $this->assertNotNull($policy->last_verified_at);
+        $this->assertNotNull($policy->offline_deadline_at);
+        Log::shouldHaveReceived('info')->with('Device heartbeat request received.', \Mockery::type('array'))->once();
+        Log::shouldHaveReceived('info')->with('Device heartbeat completed successfully.', \Mockery::type('array'))->once();
+        Log::shouldHaveReceived('info')->with('Offline policy acknowledgement request received.', \Mockery::type('array'))->once();
+        Log::shouldHaveReceived('info')->with('Offline policy acknowledgement completed successfully.', \Mockery::type('array'))->once();
+    }
+
+    public function test_heartbeat_authentication_and_validation_failures_are_logged_safely(): void
+    {
+        Log::spy();
+        $this->withToken('unknown-device-token')->postJson('/api/v1/devices/heartbeat', [
+            'gps_status' => 'enabled',
+        ])->assertUnauthorized()->assertExactJson(['message' => 'Unauthenticated device.']);
+        Log::shouldHaveReceived('warning')->with(
+            'Device sync authentication failed.',
+            \Mockery::on(fn (array $context) => $context['request_path'] === 'api/v1/devices/heartbeat'
+                && $context['bearer_token_present'] === true
+                && $context['token_record_found'] === false
+                && ! str_contains(json_encode($context), 'unknown-device-token')),
+        )->once();
+
+        $device = $this->device($this->user());
+        $plain = 'heartbeat-validation-token';
+        DeviceToken::create(['device_id' => $device->id, 'token_hash' => hash('sha256', $plain)]);
+        $this->withToken($plain)->postJson('/api/v1/devices/heartbeat', [
+            'gps_status' => 'not-a-valid-status',
+        ])->assertUnprocessable()->assertJsonValidationErrors('gps_status');
+        Log::shouldHaveReceived('warning')->with(
+            'Device heartbeat validation failed.',
+            \Mockery::on(fn (array $context) => $context['device_id'] === $device->id
+                && in_array('gps_status', $context['failed_fields'], true)),
+        )->once();
     }
 
     public function test_heartbeat_returns_controlled_error_and_does_not_mark_sync_success_when_signing_fails(): void
