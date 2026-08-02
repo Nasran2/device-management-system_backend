@@ -256,6 +256,27 @@ class DeviceManagementTest extends TestCase
         $this->assertDatabaseHas('device_commands', ['device_id' => $device->id, 'type' => 'PERMANENT_RELEASE']);
     }
 
+    public function test_permanent_release_signature_uses_the_installed_android_string_payload_format(): void
+    {
+        $admin = $this->user();
+        $device = $this->device($admin, ['status' => 'active_unlocked', 'lock_status' => 'unlocked']);
+        $command = app(CommandService::class)->create($device, 'PERMANENT_RELEASE', [
+            'reason' => 'Finance completed',
+            'offline_protection_disabled' => true,
+        ], $admin);
+
+        $this->assertSame([
+            'reason' => 'Finance completed',
+            'offline_protection_disabled' => 'true',
+        ], $command->payload);
+
+        $androidPayloadJson = '{"reason":"Finance completed","offline_protection_disabled":"true"}';
+        $canonical = $command->uuid.'|'.$device->uuid.'|PERMANENT_RELEASE|'.$androidPayloadJson.'|'.$command->expires_at->toISOString();
+        $verificationKey = hash_hmac('sha256', $device->uuid, config('device.command_signing_key'));
+        $this->assertSame(hash_hmac('sha256', $canonical, $verificationKey), $command->signature);
+        $this->assertTrue(app(CommandService::class)->verify($command));
+    }
+
     public function test_temporary_unlock_code_is_hashed_device_specific_and_single_use(): void
     {
         $admin = $this->user();

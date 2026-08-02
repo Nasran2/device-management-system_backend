@@ -26,6 +26,11 @@ class CommandService
             throw ValidationException::withMessages(['device' => 'Archived or released devices cannot receive commands.']);
         }
 
+        // The installed Android client deserializes command payloads as
+        // Map<String, String>. Normalize before signing so booleans and numbers
+        // cannot change JSON type when Android recreates the canonical envelope.
+        $payload = $this->normalizePayload($payload);
+
         $command = DB::transaction(function () use ($device, $type, $payload, $requester) {
             $uuid = (string) Str::uuid();
             $expiresAt = now()->addMinutes((int) config('device.command_expiry_minutes', 15))->startOfSecond();
@@ -68,5 +73,23 @@ class CommandService
     private function deviceKey(Device $device): string
     {
         return hash_hmac('sha256', $device->uuid, config('device.command_signing_key'));
+    }
+
+    /** @return array<string, string|null> */
+    private function normalizePayload(array $payload): array
+    {
+        $normalized = [];
+        foreach ($payload as $key => $value) {
+            $normalized[(string) $key] = match (true) {
+                $value === null => null,
+                is_bool($value) => $value ? 'true' : 'false',
+                is_scalar($value) => (string) $value,
+                default => throw ValidationException::withMessages([
+                    'payload' => 'Command payload values must be strings, numbers, booleans, or null.',
+                ]),
+            };
+        }
+
+        return $normalized;
     }
 }
