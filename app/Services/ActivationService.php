@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\DeviceActivationException;
+use App\Jobs\SendActivationCodeSms;
 use App\Models\Device;
 use App\Models\DeviceActivation;
 use App\Models\DeviceSetupSession;
@@ -248,6 +249,37 @@ class ActivationService
             'shop_name' => $device->shop?->name ?? $user?->business_name ?? 'DeviceGuard',
             'valid_hours' => (string) ceil($this->expiryMinutes() / 60),
         ], $device->shop_id, $device->customer_id, $device->id, $user);
+    }
+
+    public function queueSmsIfEnabled(Device $device, ?User $user, ?DeviceActivation $activation = null): bool
+    {
+        if (! SystemSetting::value('send_activation_code_by_sms', false)) {
+            return false;
+        }
+
+        $phone = trim((string) $device->customer?->phone);
+        $digits = preg_replace('/\D+/', '', $phone);
+        if ($phone === '' || strlen((string) $digits) < 9 || strlen((string) $digits) > 15) {
+            return false;
+        }
+
+        $activation ??= $device->activations()
+            ->whereNull('used_at')
+            ->whereNull('revoked_at')
+            ->where('expires_at', '>', now())
+            ->latest('id')
+            ->first();
+        if (! $activation || ! $activation->isUsable()) {
+            return false;
+        }
+
+        // Activation must return immediately even when the application's default
+        // queue is still "sync". Production already runs the database worker.
+        SendActivationCodeSms::dispatch($activation->id, $user?->id)
+            ->onConnection('database')
+            ->afterCommit();
+
+        return true;
     }
 
     public function activate(string $code, array $data): array

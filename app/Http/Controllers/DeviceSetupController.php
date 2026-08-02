@@ -6,8 +6,8 @@ use App\Models\Device;
 use App\Models\DeviceSetupInstruction;
 use App\Models\DeviceSetupSession;
 use App\Models\SystemSetting;
-use App\Services\AuditService;
 use App\Services\ActivationService;
+use App\Services\AuditService;
 use App\Services\DeviceGuardApkSettings;
 use App\Services\SetupInstructionCatalog;
 use Illuminate\Http\Request;
@@ -101,7 +101,11 @@ class DeviceSetupController extends Controller
             if ($setup->status === 'in_progress' && $request->user()->can('generateActivationCode', $setup->device)) {
                 $issued = $this->activations->ensure($setup->device, $request->user(), $setup, 'setup_activation_stage');
                 if ($issued['generated']) {
-                    $this->activations->sendSmsIfEnabled($setup->device->loadMissing(['customer', 'shop']), $issued['plain'], $request->user());
+                    $this->activations->queueSmsIfEnabled(
+                        $setup->device->loadMissing(['customer', 'shop']),
+                        $request->user(),
+                        $issued['activation'],
+                    );
                 }
                 $legacyCompatibilityReplaced = $issued['legacy_replaced'];
             }

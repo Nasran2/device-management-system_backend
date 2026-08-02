@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\SendActivationCodeSms;
 use App\Models\AuditLog;
 use App\Models\Customer;
 use App\Models\Device;
@@ -13,9 +14,12 @@ use App\Models\User;
 use App\Services\ActivationService;
 use App\Services\SetupInstructionCatalog;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -101,7 +105,7 @@ class ActivationCodeLifecycleTest extends TestCase
         [, , $firstDevice] = $this->tenant();
         DeviceActivation::create([
             'device_id' => $firstDevice->id,
-            'code_hash' => \Illuminate\Support\Facades\Hash::make('DG-7K4P2M9'),
+            'code_hash' => Hash::make('DG-7K4P2M9'),
             'encrypted_code' => 'DG-7K4P2M9',
             'expires_at' => now()->addDay(),
         ]);
@@ -113,7 +117,7 @@ class ActivationCodeLifecycleTest extends TestCase
         [, , $secondDevice] = $this->tenant();
         DeviceActivation::create([
             'device_id' => $secondDevice->id,
-            'code_hash' => \Illuminate\Support\Facades\Hash::make('DG-ABC1234'),
+            'code_hash' => Hash::make('DG-ABC1234'),
             'encrypted_code' => 'DG-ABC1234',
             'expires_at' => now()->addDay(),
         ]);
@@ -141,8 +145,8 @@ class ActivationCodeLifecycleTest extends TestCase
                 ->assertJsonPath('error_code', 'invalid_activation_code')
                 ->assertJsonPath('message', 'The activation code is invalid, expired, or already used.')
                 ->assertJsonStructure(['message', 'error_code', 'errors' => ['activation_code']]);
-            \Illuminate\Support\Facades\RateLimiter::clear('activation-ip:127.0.0.1');
-            \Illuminate\Support\Facades\RateLimiter::clear('activation-device:'.hash('sha256', $device->uuid));
+            RateLimiter::clear('activation-ip:127.0.0.1');
+            RateLimiter::clear('activation-device:'.hash('sha256', $device->uuid));
         }
 
     }
@@ -165,7 +169,7 @@ class ActivationCodeLifecycleTest extends TestCase
         $legacyPlain = '546250';
         $legacy = DeviceActivation::create([
             'device_id' => $device->id,
-            'code_hash' => \Illuminate\Support\Facades\Hash::make($legacyPlain),
+            'code_hash' => Hash::make($legacyPlain),
             'encrypted_code' => $legacyPlain,
             'expires_at' => now()->addDay(),
         ]);
@@ -187,14 +191,14 @@ class ActivationCodeLifecycleTest extends TestCase
         $activePlain = '654321';
         $active = DeviceActivation::create([
             'device_id' => $device->id,
-            'code_hash' => \Illuminate\Support\Facades\Hash::make($activePlain),
+            'code_hash' => Hash::make($activePlain),
             'encrypted_code' => $activePlain,
             'expires_at' => now()->addDay(),
         ]);
         $usedPlain = '123456';
         $used = DeviceActivation::create([
             'device_id' => $device->id,
-            'code_hash' => \Illuminate\Support\Facades\Hash::make($usedPlain),
+            'code_hash' => Hash::make($usedPlain),
             'encrypted_code' => $usedPlain,
             'expires_at' => now()->addDay(),
             'used_at' => now(),
@@ -261,6 +265,47 @@ class ActivationCodeLifecycleTest extends TestCase
         $this->assertNotNull($old['activation']->fresh()->revoked_at);
         $this->assertSame(2, $device->activations()->count());
         $this->assertSame(1, $device->activations()->whereNull('used_at')->whereNull('revoked_at')->where('expires_at', '>', now())->count());
+    }
+
+    public function test_regeneration_queues_activation_sms_without_waiting_for_the_provider(): void
+    {
+        [, $owner, $device] = $this->tenant();
+        SystemSetting::updateOrCreate(['key' => 'send_activation_code_by_sms'], ['value' => 'true', 'type' => 'boolean']);
+        Queue::fake();
+        Http::preventStrayRequests();
+
+        $this->actingAs($owner)->post(route('devices.activation-code.generate', $device), [
+            'password' => 'Password@123',
+            'confirmed' => 1,
+            'reason' => 'Customer requested replacement',
+        ])->assertRedirect()->assertSessionHasNoErrors()->assertSessionHas('success');
+
+        $activation = $device->activations()->latest('id')->firstOrFail();
+        Queue::assertPushed(SendActivationCodeSms::class, fn ($job) => $job->activationId === $activation->id
+            && $job->requestedById === $owner->id
+            && $job->connection === 'database');
+        Http::assertNothingSent();
+    }
+
+    public function test_queued_activation_sms_sends_the_current_code_without_serializing_it_in_the_job(): void
+    {
+        [, $owner, $device] = $this->tenant();
+        SystemSetting::updateOrCreate(['key' => 'send_activation_code_by_sms'], ['value' => 'true', 'type' => 'boolean']);
+        SystemSetting::updateOrCreate(['key' => 'sms_enabled'], ['value' => 'true', 'type' => 'boolean']);
+        SystemSetting::updateOrCreate(['key' => 'sms_api_key_encrypted'], ['value' => Crypt::encryptString('test-api-key'), 'type' => 'encrypted']);
+        Http::fake(['*' => Http::response(['message_id' => 'queued-sms-123'], 200)]);
+        $issued = app(ActivationService::class)->ensure($device, $owner);
+        $job = new SendActivationCodeSms($issued['activation']->id, $owner->id);
+
+        $this->assertStringNotContainsString($issued['plain'], serialize($job));
+        $job->handle(app(ActivationService::class));
+
+        $this->assertDatabaseHas('sms_logs', [
+            'device_id' => $device->id,
+            'template' => 'device_activation_code',
+            'sent_status' => 'sent',
+        ]);
+        Http::assertSent(fn ($request) => str_contains($request['text'], $issued['plain']));
     }
 
     public function test_expired_used_and_revoked_codes_are_rejected(): void

@@ -119,7 +119,7 @@ class DeviceController extends Controller
         }
 
         try {
-            $activations->sendSmsIfEnabled($device->loadMissing(['customer', 'shop']), $code, $request->user());
+            $activations->queueSmsIfEnabled($device->loadMissing(['customer', 'shop']), $request->user());
         } catch (\Throwable $exception) {
             $notificationFailed = true;
             $this->logPostRegistrationNotificationFailure($device, 'device_activation_code', $exception);

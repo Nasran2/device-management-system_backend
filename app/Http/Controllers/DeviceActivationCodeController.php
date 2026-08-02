@@ -24,7 +24,11 @@ class DeviceActivationCodeController extends Controller
             $data['reason'] ?? 'manual_regeneration',
             true,
         );
-        $activations->sendSmsIfEnabled($device->loadMissing(['customer', 'shop']), $result['plain'], $request->user());
+        $activations->queueSmsIfEnabled(
+            $device->loadMissing(['customer', 'shop']),
+            $request->user(),
+            $result['activation'],
+        );
 
         return back()->with('success', $result['legacy_replaced']
             ? 'A new activation code was generated for compatibility with the installed Android app.'
