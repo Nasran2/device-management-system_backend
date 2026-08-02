@@ -6,6 +6,7 @@ use App\Models\Customer;
 use App\Models\Device;
 use App\Models\DeviceActivation;
 use App\Models\DeviceToken;
+use App\Models\Shop;
 use App\Models\SystemSetting;
 use App\Models\User;
 use App\Services\ApkFileIntegrity;
@@ -13,6 +14,7 @@ use App\Services\CommandService;
 use App\Services\DeviceGuardApkSettings;
 use App\Services\FirebaseMessagingService;
 use App\Services\QrProvisioningService;
+use App\Services\SmsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Hash;
@@ -284,6 +286,62 @@ class DeviceManagementTest extends TestCase
         $device = Device::firstOrFail();
         $this->assertTrue(Hash::check('9876', $device->management_pin_hash));
         $this->assertSame('9876', Crypt::decryptString($device->management_pin_encrypted));
+    }
+
+    public function test_post_registration_sms_exception_does_not_return_500_or_duplicate_the_saved_device(): void
+    {
+        $shop = Shop::create([
+            'name' => 'Safe Registration Shop',
+            'owner_name' => 'Owner',
+            'email' => 'safe-registration@shop.test',
+            'mobile' => '0770000000',
+            'address' => 'Colombo',
+            'reference_code' => 'SAFE-REG',
+            'commission_percentage' => 5,
+            'commission_basis' => 'selling_price_percentage',
+            'sms_enabled' => true,
+        ]);
+        $owner = User::create([
+            'shop_id' => $shop->id,
+            'name' => 'Owner',
+            'email' => 'safe-registration-owner@example.com',
+            'password' => 'Password@123',
+            'role' => 'shop_owner',
+            'is_active' => true,
+        ]);
+        SystemSetting::create(['key' => 'new_device_notification_mode', 'value' => 'immediate', 'type' => 'string']);
+        SystemSetting::create(['key' => 'new_device_sms_recipients', 'value' => '0771234567', 'type' => 'string']);
+
+        $sms = \Mockery::mock(SmsService::class);
+        $sms->shouldReceive('send')->once()->andThrow(new \RuntimeException('Simulated provider failure'));
+        $this->app->instance(SmsService::class, $sms);
+
+        $response = $this->actingAs($owner)->post(route('devices.store'), [
+            'customer_name' => 'Saved Customer',
+            'customer_phone' => '0772222222',
+            'customer_address' => 'Colombo',
+            'brand' => 'Samsung',
+            'model' => 'A15',
+            'imei' => '359999999999991',
+            'selling_price' => 45000,
+            'currency' => 'LKR',
+            'management_mode' => 'managed',
+            'management_pin' => '9876',
+            'management_pin_confirmation' => '9876',
+            'first_payment' => 10000,
+            'number_of_installments' => 4,
+            'first_due_date' => '2026-09-01',
+            'payment_frequency' => 'monthly',
+            'installment_amount' => 8750,
+        ]);
+
+        $device = Device::where('imei', '359999999999991')->firstOrFail();
+        $response->assertRedirect(route('devices.show', $device));
+        $response->assertSessionHas('success', 'Device registered and activation code generated.');
+        $response->assertSessionHas('warning');
+        $this->assertDatabaseCount('devices', 1);
+        $this->assertDatabaseHas('device_financing', ['device_id' => $device->id, 'selling_price' => 45000]);
+        $this->assertDatabaseHas('device_activations', ['device_id' => $device->id]);
     }
 
     public function test_pin_reveal_requires_password_and_device_ownership(): void

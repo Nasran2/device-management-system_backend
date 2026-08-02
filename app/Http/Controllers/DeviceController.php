@@ -22,6 +22,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
@@ -93,17 +94,62 @@ class DeviceController extends Controller
 
             return [$device, $code];
         });
-        if ($device->shop_id && $request->user()->shop?->sms_enabled && in_array(SystemSetting::value('new_device_notification_mode', 'disabled'), ['immediate', 'both'], true)) {
-            $finance = $device->financing;
-            $commission = $device->commission;
-            foreach (array_filter(array_map('trim', explode(',', (string) SystemSetting::value('new_device_sms_recipients', '')))) as $recipient) {
-                $sms->send('new_device', $recipient, ['shop_name' => $device->shop->name, 'customer_name' => $device->customer->name, 'phone_brand' => $device->brand, 'phone_model' => $device->model, 'selling_price' => number_format((float) $device->selling_price, 2), 'first_payment' => number_format((float) $finance?->first_payment, 2), 'months' => $finance?->number_of_installments, 'commission' => number_format((float) $commission?->commission_amount, 2), 'commission_amount' => number_format((float) $commission?->commission_amount, 2), 'commission_percentage' => $commission?->captured_percentage, 'device_reference' => strtoupper(substr($device->uuid, 0, 8))], $device->shop_id, $device->customer_id, $device->id, $request->user());
+        $notificationFailed = false;
+
+        // The device and its financial records have already committed. A provider,
+        // configuration, or SMS-log failure must never turn that successful write
+        // into a misleading 500 response that encourages a duplicate registration.
+        try {
+            if ($device->shop_id && $request->user()->shop?->sms_enabled && in_array(SystemSetting::value('new_device_notification_mode', 'disabled'), ['immediate', 'both'], true)) {
+                $device->loadMissing(['shop', 'customer', 'financing', 'commission']);
+                $finance = $device->financing;
+                $commission = $device->commission;
+                foreach (array_filter(array_map('trim', explode(',', (string) SystemSetting::value('new_device_sms_recipients', '')))) as $recipient) {
+                    try {
+                        $sms->send('new_device', $recipient, ['shop_name' => $device->shop?->name ?? 'DeviceGuard', 'customer_name' => $device->customer?->name ?? 'Customer', 'phone_brand' => $device->brand, 'phone_model' => $device->model, 'selling_price' => number_format((float) $device->selling_price, 2), 'first_payment' => number_format((float) $finance?->first_payment, 2), 'months' => $finance?->number_of_installments, 'commission' => number_format((float) $commission?->commission_amount, 2), 'commission_amount' => number_format((float) $commission?->commission_amount, 2), 'commission_percentage' => $commission?->captured_percentage, 'device_reference' => strtoupper(substr($device->uuid, 0, 8))], $device->shop_id, $device->customer_id, $device->id, $request->user());
+                    } catch (\Throwable $exception) {
+                        $notificationFailed = true;
+                        $this->logPostRegistrationNotificationFailure($device, 'new_device', $exception, $recipient);
+                    }
+                }
             }
+        } catch (\Throwable $exception) {
+            $notificationFailed = true;
+            $this->logPostRegistrationNotificationFailure($device, 'new_device_preparation', $exception);
         }
 
-        $activations->sendSmsIfEnabled($device->loadMissing(['customer', 'shop']), $code, $request->user());
+        try {
+            $activations->sendSmsIfEnabled($device->loadMissing(['customer', 'shop']), $code, $request->user());
+        } catch (\Throwable $exception) {
+            $notificationFailed = true;
+            $this->logPostRegistrationNotificationFailure($device, 'device_activation_code', $exception);
+        }
 
-        return redirect()->route('devices.show', $device)->with('success', 'Device registered and activation code generated.');
+        $redirect = redirect()->route('devices.show', $device)
+            ->with('success', 'Device registered and activation code generated.');
+
+        return $notificationFailed
+            ? $redirect->with('warning', 'The device was saved successfully, but one or more notification SMS messages could not be sent. You can retry them from SMS History.')
+            : $redirect;
+    }
+
+    private function logPostRegistrationNotificationFailure(Device $device, string $event, \Throwable $exception, ?string $recipient = null): void
+    {
+        try {
+            Log::error('Post-registration notification failed; device registration remains successful.', [
+                'device_id' => $device->id,
+                'device_uuid' => $device->uuid,
+                'shop_id' => $device->shop_id,
+                'customer_id' => $device->customer_id,
+                'notification_event' => $event,
+                'recipient_fingerprint' => $recipient ? hash('sha256', $recipient) : null,
+                'exception_class' => $exception::class,
+                'exception_message' => mb_substr($exception->getMessage(), 0, 1000),
+            ]);
+        } catch (\Throwable) {
+            // A logging permission or disk failure must not recreate the original
+            // post-commit 500 response.
+        }
     }
 
     public function show(Request $request, Device $device, QrProvisioningService $qr, OfflineProtectionService $offline, ActivationService $activations)
